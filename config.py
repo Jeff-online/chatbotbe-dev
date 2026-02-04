@@ -29,7 +29,7 @@ class Config:
 
     ALLOWED_EXTENSIONS = {'pdf', 'xlsx','txt', 'xls', 'json', 'docx', 'jpg', 'jpeg', 'png'}
 
-
+# point to the new DEV environment.
 class DevelopmentConfig(Config):
     COSMOS_URI = "https://ailab-db-uat.documents.azure.com:443/"
     DATABASE_NAME = "chatbot_test1"
@@ -46,3 +46,4 @@ config = {
     'production': ProductionConfig,
     'default': DevelopmentConfig
 }
+
