@@ -31,7 +31,7 @@ class Config:
 
 
 class DevelopmentConfig(Config):
-    COSMOS_URI = "https://ailab-db.documents.azure.com:443/"
+    COSMOS_URI = "https://ailab-db-uat.documents.azure.com:443/"
     DATABASE_NAME = "chatbot_test1"
     CONTAINER_NAME = "TestContainer"
     DEBUG = True  # True
