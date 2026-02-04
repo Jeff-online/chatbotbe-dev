@@ -31,7 +31,7 @@ class Config:
 
 # point to the new DEV environment.
 class DevelopmentConfig(Config):
-    COSMOS_URI = "https://ailab-db-uat.documents.azure.com:443/"
+    COSMOS_URI = "https://ailab-db-dev.documents.azure.com:443/"
     DATABASE_NAME = "chatbot_test1"
     CONTAINER_NAME = "TestContainer"
     DEBUG = True  # True
@@ -46,4 +46,5 @@ config = {
     'production': ProductionConfig,
     'default': DevelopmentConfig
 }
+
 
