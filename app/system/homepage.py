@@ -237,7 +237,7 @@ class SessionManagement(GlobalResource):
         response = current_app.openai.ChatCompletion.create(
             deployment_id=current_app.deployment_id,  # Deploy Name
             messages=question,
-            max_tokens=4000,
+            max_completion_tokens=4000,
             temperature=0,
             seed=42
         )
