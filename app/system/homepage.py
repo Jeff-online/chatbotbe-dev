@@ -5,14 +5,40 @@ import shutil
 import chardet
 import logging
 from app import messages
-from . import system_api
+from . import system_api, wsystem
 from . args_parser import *
-from flask import current_app
+from flask import current_app, jsonify
 from datetime import datetime, timedelta
 from utils.file_utils import FileOperation
 from werkzeug.utils import secure_filename
 from common.common_resource import GlobalResource, Resource
 logger = logging.getLogger(__name__)
+
+
+class AzureTokenCache:
+    def _refresh_token(self):
+        if time.time() >= current_app.token_expires - 600:
+            new_token = current_app.credential.get_token(os.getenv("SCOPE"))
+            current_app.openai_token = new_token.token
+            current_app.token_expires = new_token.expires_on
+
+    def get_token(self):
+        return current_app.openai_token
+
+
+token_cache = AzureTokenCache()
+
+
+@wsystem.route('/test_token', methods=['GET'])
+def test_token():
+    try:
+        token_cache._refresh_token()
+        token = token_cache.get_token()
+        return jsonify({"access_token": token}), 200
+    except Exception as e:
+        logger.exception("Token Get Error")
+        return jsonify({"message": f"Token Get Error: {str(e)}"}), 500
+
 
 
 class SessionManagement(GlobalResource):
