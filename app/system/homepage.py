@@ -14,7 +14,7 @@ from werkzeug.utils import secure_filename
 from common.common_resource import GlobalResource, Resource
 logger = logging.getLogger(__name__)
 
-
+# add token testing method
 class AzureTokenCache:
     def _refresh_token(self):
         if time.time() >= current_app.token_expires - 600:
@@ -587,3 +587,4 @@ system_api.add_resource(SessionManagement, "/session_management")
 system_api.add_resource(FileManagement, "/upload_file")
 system_api.add_resource(Test1, "/test1")
 system_api.add_resource(TestMultiFile, "/test_multi_file")
+
