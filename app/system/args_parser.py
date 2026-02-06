@@ -77,3 +77,11 @@ class FileDelete(BaseArgsParser):
         self.parser.add_argument('filename', type=str, location='args')
 
 
+class CheckTokenParser(BaseArgsParser):
+    def __init__(self):
+        super().__init__()
+        self.parser.add_argument('username', type=str, required=True, help="ユーザー名")
+        self.parser.add_argument('attachment_names', type=str, action="append", required=True, help="添付ファイル名リスト")
+        self.parser.add_argument('deploy_model', type=str, help="部署モデル名（デフォルト：gpt-4o）")
+
+
