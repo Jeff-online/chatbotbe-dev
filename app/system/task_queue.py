@@ -4,15 +4,16 @@ import logging
 from datetime import datetime
 from app import messages
 from . import system_api
-from .args_parser import TaskQueuePostParser, TaskQueueDeleteParser
+from .args_parser import TaskQueuePostParser, TaskQueueDeleteParser, QueueStateGetParser, QueueStatePostParser
 from flask import current_app
 from common.common_resource import GlobalResource
 from azure.storage.queue import QueueClient
+from azure.core.exceptions import ResourceExistsError
 
 logger = logging.getLogger(__name__)
 
 
-class QueueState:
+class QueueState(GlobalResource):
 
     @staticmethod
     def create(username: str, queue_name: str, message: str, message_id: str, status: str) -> str:
@@ -40,6 +41,59 @@ class QueueState:
             item["update_time"] = datetime.now().isoformat()
             current_app.container.upsert_item(item)
 
+    def get(self):
+        args_parser = QueueStateGetParser()
+        args = args_parser.parser.parse_args()
+        username = args.get("username")
+        queue_name = args.get("queue_name")
+        message_id = args.get("message_id")
+        status = args.get("status")
+        query = "SELECT * FROM user u WHERE u.type = 'queue_state'"
+        params = []
+        if username:
+            query += " AND u.username = @username"
+            params.append({"name": "@username", "value": username})
+        if queue_name:
+            query += " AND u.queue_name = @queue_name"
+            params.append({"name": "@queue_name", "value": queue_name})
+        if message_id:
+            query += " AND u.message_id = @message_id"
+            params.append({"name": "@message_id", "value": message_id})
+        if status:
+            query += " AND u.status = @status"
+            params.append({"name": "@status", "value": status})
+        items = list(current_app.container.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+        result = []
+        for item in items:
+            result.append({
+                "id": item.get("id", ""),
+                "username": item.get("username", ""),
+                "queue_name": item.get("queue_name", ""),
+                "message": item.get("message", ""),
+                "message_id": item.get("message_id", ""),
+                "status": item.get("status", ""),
+                "create_time": item.get("create_time", ""),
+                "update_time": item.get("update_time", "")
+            })
+        return {"queue_state": result, "code": 200, "params": params}
+
+    def post(self):
+        args_parser = QueueStatePostParser()
+        args = args_parser.parser.parse_args()
+        username = args.get("username")
+        queue_name = args.get("queue_name")
+        message = args.get("message")
+        message_id = args.get("message_id")
+        status = args.get("status")
+        doc_id = QueueState.create(
+            username=username,
+            queue_name=queue_name,
+            message=message,
+            message_id=message_id,
+            status=status
+        )
+        return {"id": doc_id, "code": 200}
+
 
 class TaskQueue(GlobalResource):
 
@@ -62,6 +116,10 @@ class TaskQueue(GlobalResource):
 
         try:
             queue_client = self._get_queue_client(queue_name)
+            try:
+                queue_client.create_queue()
+            except ResourceExistsError:
+                pass
             send_result = queue_client.send_message(message)
             queue_state_id = QueueState.create(
                 username=username,
@@ -105,4 +163,5 @@ class TaskQueue(GlobalResource):
 
 
 system_api.add_resource(TaskQueue, "/task_queue")
+system_api.add_resource(QueueState, "/queue_state")
 
