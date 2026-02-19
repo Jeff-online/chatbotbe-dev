@@ -85,3 +85,20 @@ class CheckTokenParser(BaseArgsParser):
         self.parser.add_argument('deploy_model', type=str, help="部署モデル名（デフォルト：gpt-4o）")
 
 
+class TaskQueuePostParser(BaseArgsParser):
+    def __init__(self):
+        super().__init__()
+        self.parser.add_argument('username', type=str, required=True, help="ユーザー名")
+        self.parser.add_argument('queue_name', type=str, required=True, help="キュー名")
+        self.parser.add_argument('message', type=str, required=True, help="送信メッセージ")
+
+
+class TaskQueueDeleteParser(BaseArgsParser):
+    def __init__(self):
+        super().__init__()
+        self.parser.add_argument('username', type=str, required=True, location='args', help="ユーザー名")
+        self.parser.add_argument('queue_name', type=str, required=True, location='args', help="キュー名")
+        self.parser.add_argument('message_id', type=str, required=True, location='args', help="メッセージID")
+        self.parser.add_argument('pop_receipt', type=str, required=True, location='args', help="pop receipt")
+
+

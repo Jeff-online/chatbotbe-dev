@@ -31,9 +31,9 @@ class LoginApi(Resource):
                 raise messages.LoginError
             if not check_password_hash(user_info['password'], password):
                 raise messages.PasswordError
-            token = self.generate_auth_token(user_id=user_info["id"], exp=datetime.now() + timedelta(seconds=10800))
+            token = self.generate_auth_token(user_id=user_info["id"], exp=datetime.now() + timedelta(seconds=28800))
             logging.info(f"{username} Login Successful")
-            return {'token': token.decode('ascii'), 'duration': 10800, 'username': user_info["username"], 
+            return {'token': token.decode('ascii'), 'duration': 28800, 'username': user_info["username"], 
                     'success': True, 'permission': user_info["permission"], 'UserId': user_info["id"]}
         raise messages.UserNotExistsError
 
