@@ -96,10 +96,10 @@ class TaskQueuePostParser(BaseArgsParser):
 class TaskQueueDeleteParser(BaseArgsParser):
     def __init__(self):
         super().__init__()
-        self.parser.add_argument('username', type=str, required=True, location='args', help="ユーザー名")
-        self.parser.add_argument('queue_name', type=str, required=True, location='args', help="キュー名")
-        self.parser.add_argument('message_id', type=str, required=True, location='args', help="メッセージID")
-        self.parser.add_argument('pop_receipt', type=str, required=True, location='args', help="pop receipt")
+        self.parser.add_argument('username', type=str, required=True, location=['json', 'args'], help="ユーザー名")
+        self.parser.add_argument('queue_name', type=str, required=True, location=['json', 'args'], help="キュー名")
+        self.parser.add_argument('message_id', type=str, required=True, location=['json', 'args'], help="メッセージID")
+        self.parser.add_argument('pop_receipt', type=str, location=['json', 'args'], help="pop receipt")
 
 
 class QueueStateGetParser(BaseArgsParser):
