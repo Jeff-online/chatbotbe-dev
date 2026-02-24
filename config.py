@@ -8,6 +8,7 @@ base_path = os.path.abspath(os.path.dirname(__file__))
 class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or "@^4_00wedv**pi)+(!w1rwi=d3q4l=ie=g-u$s8jevmj*zgg2h"
     INIT_PW = "123456"
+    QUEUE_STATE_CONTAINER_NAME = "task_queue"
 
     log_level = logging.INFO
     logger = logging.getLogger()

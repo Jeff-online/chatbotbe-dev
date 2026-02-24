@@ -28,18 +28,18 @@ class QueueState(GlobalResource):
             "status": status,
             "create_time": datetime.now().isoformat()
         }
-        current_app.container.create_item(body=item)
+        current_app.container_task_queue.create_item(body=item)
         return doc_id
 
     @staticmethod
     def update_status_by_message_id(message_id: str, status: str) -> None:
         query = "SELECT * FROM user u WHERE u.type = 'queue_state' AND u.message_id = @message_id"
         params = [{"name": "@message_id", "value": message_id}]
-        items = list(current_app.container.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+        items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
         for item in items:
             item["status"] = status
             item["update_time"] = datetime.now().isoformat()
-            current_app.container.upsert_item(item)
+            current_app.container_task_queue.upsert_item(item)
 
     def get(self):
         args_parser = QueueStateGetParser()
@@ -62,7 +62,7 @@ class QueueState(GlobalResource):
         if status:
             query += " AND u.status = @status"
             params.append({"name": "@status", "value": status})
-        items = list(current_app.container.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+        items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
         result = []
         for item in items:
             result.append({

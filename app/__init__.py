@@ -33,9 +33,14 @@ def register_extensions(app):
     client = CosmosClient(app.config["COSMOS_URI"], credential=credential)
     database_name = app.config['DATABASE_NAME']
     container_name = app.config['CONTAINER_NAME']
+    queue_state_container_name = app.config.get('QUEUE_STATE_CONTAINER_NAME', 'task_queue')
     database = client.create_database_if_not_exists(id=database_name)
     container = database.create_container_if_not_exists(
         id=container_name,
+        partition_key=PartitionKey(path="/id")
+    )
+    container_task_queue = database.create_container_if_not_exists(
+        id=queue_state_container_name,
         partition_key=PartitionKey(path="/id")
     )
     container_c = database.create_container_if_not_exists(
@@ -47,6 +52,7 @@ def register_extensions(app):
     app.cosmos_client = client
     app.container = container
     app.container_c = container_c
+    app.container_task_queue = container_task_queue
 
     openai.api_type = "azure_ad"
     openai.api_base = os.getenv("AZURE_OPENAI_ENDPOINT")
