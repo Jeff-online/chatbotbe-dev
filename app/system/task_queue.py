@@ -75,7 +75,7 @@ class QueueState(GlobalResource):
                 "create_time": item.get("create_time", ""),
                 "update_time": item.get("update_time", "")
             })
-        return {"queue_state": result, "code": 200, "params": params}
+        return {"count": len(result), "queue_state": result, "code": 200, "params": params}
 
     def post(self):
         args_parser = QueueStatePostParser()
