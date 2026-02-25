@@ -61,6 +61,7 @@ class SessionPutParser(SessionAddParser):
         self.parser.add_argument('attachment_name', type=str, action="append", help="添付ファイル名")
         self.parser.add_argument('content', type=str, help="セッションの内容をご確認ください")
         self.parser.add_argument('session_id', type=str)
+        self.parser.add_argument('deploy_model', type=str, help="部署モデル名（デフォルト：gpt-5.2）")
 
 
 class FileParser(BaseArgsParser):

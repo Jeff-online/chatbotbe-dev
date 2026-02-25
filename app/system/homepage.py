@@ -97,6 +97,7 @@ class SessionManagement(GlobalResource):
         attachment_names = args.get("attachment_name")   # 这里可能是 str 或 list
         content = args.get("content")
         session_id = args.get("session_id")
+        deploy_model = args.get("deploy_model")
         if not username:
             raise messages.UserNameNotExistsError
         user_data = list(current_app.container.query_items(
@@ -140,7 +141,7 @@ class SessionManagement(GlobalResource):
 
                         try:
                             content = clue + content
-                            content, response_ai = self.get_answer(file_content, content, dialogue_history, history_data)
+                            content, response_ai = self.get_answer(file_content, content, dialogue_history, history_data, deploy_model)
                         except Exception as e:
                             return {"message": str(e), "status": 404}
 
@@ -191,7 +192,7 @@ class SessionManagement(GlobalResource):
         raise messages.UserNotExistsError
 
     @staticmethod
-    def get_answer(file_content: dict, input_data: str, question: list, history=None):
+    def get_answer(file_content: dict, input_data: str, question: list, history=None, deploy_model=None):
         """
         file_content: dict {filename: {"text": str, "images": [base64,...]}, ...}
         """
@@ -234,13 +235,26 @@ class SessionManagement(GlobalResource):
             current_app.openai_token = new_token.token
             current_app.token_expires = new_token.expires_on
         current_app.openai.api_key = current_app.openai_token
-        response = current_app.openai.ChatCompletion.create(
-            deployment_id=current_app.deployment_id,  # Deploy Name
-            messages=question,
-            max_completion_tokens=4000,
-            temperature=0,
-            seed=42
-        )
+        model_key = (deploy_model or current_app.default_model or "gpt-5.2").lower()
+        config = current_app.model_configs.get(model_key) or current_app.model_configs.get("gpt-5.2")
+        current_app.openai.api_base = config["endpoint"]
+        current_app.openai.api_version = config["api_version"]
+        if model_key == "gpt-4o":
+            response = current_app.openai.ChatCompletion.create(
+                deployment_id=config["deployment"],
+                messages=question,
+                max_tokens=4000,
+                temperature=0,
+                seed=42
+            )
+        else:
+            response = current_app.openai.ChatCompletion.create(
+                deployment_id=config["deployment"],
+                messages=question,
+                max_completion_tokens=4000,
+                temperature=0,
+                seed=42
+            )
         answer = response['choices'][0]['message']['content'].strip()
         return input_data, answer
 
@@ -405,14 +419,48 @@ class CheckToken(GlobalResource):
             return {"error": "Invalid attachment_names", "code": 400}
         
         try:
-            result = cal_tokens(username, attachment_names, deploy_model)
-            return {
-                "total_tokens": result.get("total_tokens", 0),
-                "file_tokens": result.get("file_tokens", {}),
-                "success": result.get("success", False),
-                "deploy_model": deploy_model,
-                "code": 200
-            }
+            models = []
+            if isinstance(deploy_model, str):
+                norm = deploy_model.strip().lower()
+                if norm in ("both", "all"):
+                    models = ["gpt-4o", "gpt-5.2"]
+                elif "," in norm:
+                    models = [m.strip() for m in norm.split(",") if m.strip()]
+                else:
+                    models = [deploy_model]
+            elif isinstance(deploy_model, (list, tuple)):
+                models = list(deploy_model)
+            else:
+                models = ["gpt-4o"]
+
+            if len(models) == 1:
+                model = models[0]
+                result = cal_tokens(username, attachment_names, model)
+                return {
+                    "total_tokens": result.get("total_tokens", 0),
+                    "file_tokens": result.get("file_tokens", {}),
+                    "success": result.get("success", False),
+                    "deploy_model": model,
+                    "code": 200
+                }
+            else:
+                results_by_model = {}
+                for model in models:
+                    try:
+                        results_by_model[model] = cal_tokens(username, attachment_names, model)
+                    except Exception as inner_e:
+                        results_by_model[model] = {
+                            "error": str(inner_e),
+                            "total_tokens": 0,
+                            "file_tokens": {},
+                            "success": False
+                        }
+                return {
+                    "results_by_model": results_by_model,
+                    "deploy_model": models,
+                    "success": True,
+                    "code": 200
+                }
         except Exception as e:
             return {
                 "error": str(e),

@@ -283,6 +283,7 @@ MODEL_TOKEN_LIMIT = {
     "gpt-4-turbo": 600000,
     "gpt-35-turbo": 16384,
     "gpt-3.5-turbo": 16384,
+    "gpt-5.2": 600000,
 }
 
 # ========================
@@ -303,9 +304,15 @@ def cal_tokens(username: str, attachment_names: list, deploy_model: str = "gpt-4
 
     try:
         try:
-            encoding = tiktoken.encoding_for_model(deploy_model)
-        except KeyError:
-            encoding = tiktoken.encoding_for_model("gpt-4")
+            if deploy_model in ("gpt-4o", "gpt-4o-mini", "gpt-5.2"):
+                encoding = tiktoken.get_encoding("o200k_base")
+            else:
+                encoding = tiktoken.encoding_for_model(deploy_model)
+        except Exception:
+            try:
+                encoding = tiktoken.get_encoding("o200k_base")
+            except Exception:
+                encoding = tiktoken.encoding_for_model("gpt-4")
 
         total_tokens = 0
         file_tokens = {}
@@ -380,11 +387,9 @@ def _estimate_tokens_fast(blob_client, file_extension: str, encoding):
 
         # === PDF 文件（重点优化） ===
         if file_extension == "pdf":
-            # 下载前 512KB 样本进行结构分析
             sample_len = min(512 * 1024, file_size)
             sample_data = blob_client.download_blob(offset=0, length=sample_len).readall()
 
-            # 尝试读取 PDF 结构（部分加载即可）
             try:
                 doc = fitz.open(stream=sample_data, filetype="pdf")
                 n_pages = len(doc)
@@ -393,32 +398,32 @@ def _estimate_tokens_fast(blob_client, file_extension: str, encoding):
                     n_images += len(page.get_images(full=True))
                 doc.close()
             except Exception:
-                n_pages, n_images = 1, 0  # 解析失败，保守估算
+                n_pages, n_images = 0, 0
 
-            # 图像页比例
-            img_ratio = min(n_images / max(n_pages, 1), 1.0)
+            pages_est = n_pages if n_pages > 0 else 0
+            if n_pages > 0:
+                img_ratio_est = min(n_images / max(n_pages, 1), 1.0)
+            else:
+                images_hint = sample_data.count(b"/Image") + sample_data.count(b"/Subtype /Image")
+                pages_hint = sample_data.count(b"/Type /Page")
+                if pages_hint > 0:
+                    pages_est = pages_hint
+                    img_ratio_est = min(images_hint / max(pages_hint, 1), 1.0)
+                else:
+                    img_ratio_est = 0.7 if file_size > 2 * 1024 * 1024 else 0.5
+                    avg_bytes_per_page = 200 * 1024 if img_ratio_est >= 0.6 else 40 * 1024
+                    pages_est = max(1, int(file_size / avg_bytes_per_page))
 
-            # === 估算逻辑 ===
-            # 1 token ≈ 4 字节（纯文本页）
-            # 图片页约等价于 base64 转换后每 3 字节→4字节，约 ×1.33 token 消耗
-            base_text_ratio = 1 - img_ratio
-            base_image_ratio = img_ratio * 1.33
+            text_tpp = 650
+            image_tpp = 220
+            tokens_pages = int(pages_est * ((1 - img_ratio_est) * text_tpp + img_ratio_est * image_tpp))
 
-            # 平均有效比例（非线性缓冲）
-            effective_ratio = 4 * base_text_ratio + 6 * base_image_ratio  # 偏大以防低估
+            if file_size > 5 * 1024 * 1024 and img_ratio_est >= 0.6:
+                tokens_pages = int(tokens_pages * 0.8)
+            if file_size > 20 * 1024 * 1024 and img_ratio_est >= 0.7:
+                tokens_pages = int(tokens_pages * 0.7)
 
-            # 经验衰减系数：越大文件→单位token/byte越低（考虑压缩率）
-            decay = 1.0
-            if file_size > 1 * 1024 * 1024:  # >1MB
-                decay = 0.6
-            if file_size > 3 * 1024 * 1024:  # >3MB
-                decay = 0.5
-
-            tokens = int(file_size / effective_ratio * decay)
-
-            # 限制范围（最小2k，最大120k）
-            tokens = int(file_size / effective_ratio * decay)
-            return tokens
+            return max(200, tokens_pages)
 
         # === 文本类（TXT/JSON/CSV） ===
         if file_extension in ["txt", "json", "csv"]:
@@ -430,13 +435,25 @@ def _estimate_tokens_fast(blob_client, file_extension: str, encoding):
                 return int(file_size / 4)
             sample_tokens = len(encoding.encode(sample_text))
             token_density = sample_tokens / max(len(sample_text), 1)
+            token_density = max(0.05, min(token_density, 1.0))
             avg_bytes_per_char = max(sample_size / max(len(sample_text), 1), 1.0)
             estimated_chars = file_size / avg_bytes_per_char
             return int(estimated_chars * token_density)
 
         # === Excel / Word 文件 ===
         if file_extension in ["xlsx", "xls", "docx"]:
-            return int(file_size / 6)
+            sample_size = min(256 * 1024, file_size)
+            sample_data = blob_client.download_blob(offset=0, length=sample_size).readall()
+            markers = [b"word/media", b"xl/media", b'ContentType="image/', b"/image", b"image/jpeg", b"image/png"]
+            image_markers = 0
+            for m in markers:
+                image_markers += sample_data.count(m)
+            heavy_images = image_markers >= 2 or (file_size > 3 * 1024 * 1024 and image_markers > 0)
+            if file_extension == "docx":
+                divisor = 14 if heavy_images else 10
+            else:
+                divisor = 16 if heavy_images else 12
+            return max(200, int(file_size / divisor))
 
         # === 其他未知类型 ===
         return int(file_size / 8)

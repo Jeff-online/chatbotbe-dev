@@ -154,7 +154,7 @@ class TaskQueue(GlobalResource):
         try:
             queue_client = self._get_queue_client(queue_name)
             queue_client.delete_message(message_id, pop_receipt)
-            QueueState.update_status_by_message_id(message_id, "deleted")
+            QueueState.update_status_by_message_id(message_id, "completed")
             logger.info(f"user: {username} delete message from queue: {queue_name}")
             return {"msg": "success", "code": 200}
         except Exception as e:
