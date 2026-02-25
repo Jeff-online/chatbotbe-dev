@@ -141,7 +141,7 @@ class SessionManagement(GlobalResource):
 
                         try:
                             content = clue + content
-                            content, response_ai = self.get_answer(file_content, content, dialogue_history, history_data, deploy_model)
+                            content, response_ai, used_model = self.get_answer(file_content, content, dialogue_history, history_data, deploy_model)
                         except Exception as e:
                             return {"message": str(e), "status": 404}
 
@@ -154,7 +154,7 @@ class SessionManagement(GlobalResource):
                             "session_id": session_id
                         }
                         logger.info(f"{username} input: {content}")
-                        return {'session_info': session_info, 'code': 200, 'dialogue_history': dialogue_history}
+                        return {'session_info': session_info, 'code': 200, 'dialogue_history': dialogue_history, 'deploy_model': used_model}
             return {"msg": "データ存在しない", "code": 404}
         else:
             raise messages.UserNotExistsError
@@ -187,7 +187,7 @@ class SessionManagement(GlobalResource):
                     current_app.container_c.delete_item(session_id, partition_key=session_id)
 
                     logger.info(f"user: {username}\n option: Session deleted successfully")
-                    return {'msg': 'success', 'code': 200}
+                    return {'msg': 'success', 'code': 200, 'session_id': session_id}
             raise messages.SessionIdNotExistsError
         raise messages.UserNotExistsError
 
@@ -256,7 +256,7 @@ class SessionManagement(GlobalResource):
                 seed=42
             )
         answer = response['choices'][0]['message']['content'].strip()
-        return input_data, answer
+        return input_data, answer, model_key
 
     @staticmethod
     def check_session(session_data):
