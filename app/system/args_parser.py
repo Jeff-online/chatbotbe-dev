@@ -90,8 +90,29 @@ class TaskQueuePostParser(BaseArgsParser):
     def __init__(self):
         super().__init__()
         self.parser.add_argument('username', type=str, required=True, help="ユーザー名")
-        self.parser.add_argument('queue_name', type=str, required=True, help="キュー名")
+        self.parser.add_argument('queue_name', type=str, help="キュー名")
         self.parser.add_argument('message', type=str, required=True, help="送信メッセージ")
+        self.parser.add_argument('account_name', type=str, help="アカウント名")
+        self.parser.add_argument('attachment_names', type=str, action="append", help="添付ファイル名リスト")
+
+
+class TaskQueuePutParser(BaseArgsParser):
+    def __init__(self):
+        super().__init__()
+        self.parser.add_argument('username', type=str, required=True, help="ユーザー名")
+        self.parser.add_argument('queue_name', type=str, required=True, help="キュー名")
+        self.parser.add_argument('message_id', type=str, required=True, help="メッセージID")
+        self.parser.add_argument('pop_receipt', type=str, required=True, help="pop receipt")
+        self.parser.add_argument('message', type=str, required=True, help="更新メッセージ内容")
+        self.parser.add_argument('visibility_timeout', type=int, default=0, help="不可視タイムアウト")
+
+
+class TaskQueueGetParser(BaseArgsParser):
+    def __init__(self):
+        super().__init__()
+        self.parser.add_argument('username', type=str, required=True, location='args', help="ユーザー名")
+        self.parser.add_argument('queue_name', type=str, required=True, location='args', help="キュー名")
+        self.parser.add_argument('max_messages', type=int, default=1, location='args', help="最大メッセージ数")
 
 
 class TaskQueueDeleteParser(BaseArgsParser):
