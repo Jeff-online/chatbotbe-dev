@@ -235,8 +235,8 @@ class SessionManagement(GlobalResource):
             current_app.openai_token = new_token.token
             current_app.token_expires = new_token.expires_on
         current_app.openai.api_key = current_app.openai_token
-        model_key = (deploy_model or current_app.default_model or "gpt-5.2").lower()
-        config = current_app.model_configs.get(model_key) or current_app.model_configs.get("gpt-5.2")
+        model_key = (deploy_model or current_app.default_model or "gpt-5").lower()
+        config = current_app.model_configs.get(model_key) or current_app.model_configs.get("gpt-5")
         current_app.openai.api_base = config["endpoint"]
         current_app.openai.api_version = config["api_version"]
         if model_key == "gpt-4o":
@@ -423,7 +423,7 @@ class CheckToken(GlobalResource):
             if isinstance(deploy_model, str):
                 norm = deploy_model.strip().lower()
                 if norm in ("both", "all"):
-                    models = ["gpt-4o", "gpt-5.2"]
+                    models = ["gpt-4o", "gpt-5"]
                 elif "," in norm:
                     models = [m.strip() for m in norm.split(",") if m.strip()]
                 else:

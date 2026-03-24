@@ -1,5 +1,6 @@
 import os
 import openai
+import logging
 from flask import Flask
 from flask_cors import *
 from config import config
@@ -28,6 +29,7 @@ def create_app(config_name=None):
 
 
 def register_extensions(app):
+    logger = logging.getLogger(__name__)
     credential = DefaultAzureCredential()
     openai_token = credential.get_token(os.getenv("SCOPE"))
     client = CosmosClient(app.config["COSMOS_URI"], credential=credential)
@@ -54,21 +56,56 @@ def register_extensions(app):
     app.container_c = container_c
     app.container_task_queue = container_task_queue
 
-    openai.api_type = "azure_ad"
-    gpt52_endpoint = os.getenv("AZURE_OPENAI_GPT52_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT")
-    gpt52_version = os.getenv("AZURE_OPENAI_GPT52_API_VERSION") or os.getenv("AZURE_OPENAI_API_VERSION")
-    gpt52_deployment = os.getenv("AZURE_OPENAI_GPT52_DEPLOYMENT") or os.getenv("AZURE_OPENAI_MODEL")
-    gpt4o_endpoint = os.getenv("AZURE_OPENAI_GPT4O_ENDPOINT") or gpt52_endpoint
-    gpt4o_version = os.getenv("AZURE_OPENAI_GPT4O_API_VERSION") or gpt52_version
-    gpt4o_deployment = os.getenv("AZURE_OPENAI_GPT4O_DEPLOYMENT") or gpt52_deployment
-    openai.api_base = gpt52_endpoint
-    openai.api_version = gpt52_version
-    deployment_id = gpt52_deployment
-    app.model_configs = {
-        "gpt-5.2": {"endpoint": gpt52_endpoint, "api_version": gpt52_version, "deployment": gpt52_deployment},
-        "gpt-4o": {"endpoint": gpt4o_endpoint, "api_version": gpt4o_version, "deployment": gpt4o_deployment},
-    }
-    app.default_model = "gpt-5.2"
+    try:
+        # 配置 Azure OpenAI
+        logger.info("正在配置 Azure OpenAI...")
+        openai.api_type = "azure_ad"
+        
+        # 获取 GPT-5 配置
+        gpt5_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        gpt5_version = os.getenv("AZURE_OPENAI_API_VERSION")
+        gpt5_deployment = os.getenv("AZURE_OPENAI_MODEL")
+        
+        # 验证必填的环境变量
+        if not gpt5_endpoint:
+            logger.error("缺少环境变量 AZURE_OPENAI_ENDPOINT")
+            raise ValueError("缺少环境变量 AZURE_OPENAI_ENDPOINT")
+        if not gpt5_version:
+            logger.error("缺少环境变量 AZURE_OPENAI_API_VERSION")
+            raise ValueError("缺少环境变量 AZURE_OPENAI_API_VERSION")
+        if not gpt5_deployment:
+            logger.error("缺少环境变量 AZURE_OPENAI_MODEL")
+            raise ValueError("缺少环境变量 AZURE_OPENAI_MODEL")
+        
+        # 获取 GPT-4o 配置 (可选，默认使用 GPT-5 配置)
+        gpt4o_endpoint = os.getenv("AZURE_OPENAI_GPT4O_ENDPOINT") or gpt5_endpoint
+        gpt4o_version = os.getenv("AZURE_OPENAI_GPT4O_API_VERSION") or gpt5_version
+        gpt4o_deployment = os.getenv("AZURE_OPENAI_GPT4O_DEPLOYMENT") or gpt5_deployment
+        
+        # 设置 OpenAI API 参数
+        openai.api_base = gpt5_endpoint
+        openai.api_version = gpt5_version
+        deployment_id = gpt5_deployment
+        
+        # 保存模型配置
+        app.model_configs = {
+            "gpt-5": {"endpoint": gpt5_endpoint, "api_version": gpt5_version, "deployment": gpt5_deployment},
+            "gpt-4o": {"endpoint": gpt4o_endpoint, "api_version": gpt4o_version, "deployment": gpt4o_deployment},
+        }
+        app.default_model = "gpt-5"
+        
+        # 记录配置信息
+        logger.info(f"GPT-5 配置：endpoint={gpt5_endpoint}, version={gpt5_version}, deployment={gpt5_deployment}")
+        logger.info(f"GPT-4o 配置：endpoint={gpt4o_endpoint}, version={gpt4o_version}, deployment={gpt4o_deployment}")
+        logger.info(f"默认模型：{app.default_model}")
+        logger.info("Azure OpenAI 配置完成")
+        
+    except ValueError as ve:
+        logger.error(f"OpenAI 配置错误 - 环境变量验证失败：{str(ve)}")
+        raise
+    except Exception as e:
+        logger.error(f"OpenAI 配置过程中发生异常：{str(e)}", exc_info=True)
+        raise
 
     app.openai = openai
     app.credential = credential

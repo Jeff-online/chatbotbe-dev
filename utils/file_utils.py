@@ -304,7 +304,8 @@ def cal_tokens(username: str, attachment_names: list, deploy_model: str = "gpt-4
 
     try:
         try:
-            if deploy_model in ("gpt-4o", "gpt-4o-mini", "gpt-5.2"):
+            # 仅当模型为 gpt-4 或 gpt-5 时忽略小版本
+            if deploy_model.startswith("gpt-4") or deploy_model.startswith("gpt-5"):
                 encoding = tiktoken.get_encoding("o200k_base")
             else:
                 encoding = tiktoken.encoding_for_model(deploy_model)
