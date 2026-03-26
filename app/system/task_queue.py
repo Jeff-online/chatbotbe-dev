@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class QueueState(GlobalResource):
 
     @staticmethod
-    def create(username: str, queue_name: str, message: str, message_id: str, status: str, account_name: str = None) -> str:
+    def create(username: str, queue_name: str, message: str, message_id: str, status: str, account_name: str = None, session_id: str = None) -> str:
         doc_id = str(uuid.uuid4())
         item = {
             "id": doc_id,
@@ -31,18 +31,30 @@ class QueueState(GlobalResource):
             "account_name": account_name,
             "create_time": datetime.now().isoformat()
         }
+        if session_id:
+            item["session_id"] = session_id
         current_app.container_task_queue.create_item(body=item)
         return doc_id
 
     @staticmethod
     def update_status_by_message_id(message_id: str, status: str) -> None:
-        query = "SELECT * FROM user u WHERE u.type = 'queue_state' AND u.message_id = @message_id"
+        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.message_id = @message_id"
         params = [{"name": "@message_id", "value": message_id}]
         items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
         for item in items:
             item["status"] = status
             item["update_time"] = datetime.now().isoformat()
             current_app.container_task_queue.upsert_item(item)
+
+    @staticmethod
+    def delete_by_message_id(message_id: str) -> None:
+        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.message_id = @message_id"
+        params = [{"name": "@message_id", "value": message_id}]
+        items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+        for item in items:
+            doc_id = item.get("id")
+            if doc_id:
+                current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
 
     def get(self):
         args_parser = QueueStateGetParser()
@@ -51,34 +63,48 @@ class QueueState(GlobalResource):
         queue_name = args.get("queue_name")
         message_id = args.get("message_id")
         status = args.get("status")
-        query = "SELECT * FROM user u WHERE u.type = 'queue_state'"
+        query = "SELECT * FROM c WHERE c.type = 'queue_state'"
         params = []
         if username:
-            query += " AND u.username = @username"
+            query += " AND c.username = @username"
             params.append({"name": "@username", "value": username})
         if queue_name:
-            query += " AND u.queue_name = @queue_name"
+            query += " AND c.queue_name = @queue_name"
             params.append({"name": "@queue_name", "value": queue_name})
         if message_id:
-            query += " AND u.message_id = @message_id"
+            query += " AND c.message_id = @message_id"
             params.append({"name": "@message_id", "value": message_id})
         if status:
-            query += " AND u.status = @status"
+            query += " AND c.status = @status"
             params.append({"name": "@status", "value": status})
         items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
         result = []
+        light_queue_count = 0
+        heavy_queue_count = 0
         for item in items:
+            q_name = item.get("queue_name", "")
+            if q_name == "light-queue":
+                light_queue_count += 1
+            elif q_name == "heavy-queue":
+                heavy_queue_count += 1
             result.append({
                 "id": item.get("id", ""),
                 "username": item.get("username", ""),
-                "queue_name": item.get("queue_name", ""),
+                "queue_name": q_name,
                 "message": item.get("message", ""),
                 "message_id": item.get("message_id", ""),
                 "status": item.get("status", ""),
                 "create_time": item.get("create_time", ""),
                 "update_time": item.get("update_time", "")
             })
-        return {"count": len(result), "queue_state": result, "code": 200, "params": params}
+        return {
+            "total_count": len(result),
+            "light_queue_count": light_queue_count,
+            "heavy_queue_count": heavy_queue_count,
+            "queue_state": result,
+            "code": 200,
+            "params": params
+        }
 
     def post(self):
         args_parser = QueueStatePostParser()
@@ -88,14 +114,57 @@ class QueueState(GlobalResource):
         message = args.get("message")
         message_id = args.get("message_id")
         status = args.get("status")
+        session_id = args.get("session_id")
         doc_id = QueueState.create(
             username=username,
             queue_name=queue_name,
             message=message,
             message_id=message_id,
-            status=status
+            status=status,
+            session_id=session_id
         )
         return {"id": doc_id, "code": 200}
+
+
+class QueueStats(GlobalResource):
+    
+    def get(self):
+        """获取待解析队列统计信息"""
+        args_parser = QueueStateGetParser()
+        args = args_parser.parser.parse_args()
+        username = args.get("username")
+        
+        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status = 'queued'"
+        params = []
+        
+        if username:
+            query += " AND c.username = @username"
+            params.append({"name": "@username", "value": username})
+        
+        items = list(current_app.container_task_queue.query_items(
+            query=query, 
+            parameters=params, 
+            enable_cross_partition_query=True
+        ))
+        
+        total_pending = 0
+        light_queue_pending = 0
+        heavy_queue_pending = 0
+        
+        for item in items:
+            q_name = item.get("queue_name", "")
+            total_pending += 1
+            if q_name == "light-queue":
+                light_queue_pending += 1
+            elif q_name == "heavy-queue":
+                heavy_queue_pending += 1
+        
+        return {
+            "total_pending": total_pending,
+            "light_queue_pending": light_queue_pending,
+            "heavy_queue_pending": heavy_queue_pending,
+            "code": 200
+        }
 
 
 class TaskQueue(GlobalResource):
@@ -159,7 +228,8 @@ class TaskQueue(GlobalResource):
                 message=message_json,
                 message_id=send_result.id,
                 status=status,
-                account_name=account_name
+                account_name=account_name,
+                session_id=None
             )
             logger.info(f"user: {username} send message to queue: {queue_name}")
             return {
@@ -288,7 +358,7 @@ class TaskQueue(GlobalResource):
         try:
             queue_client = self._get_queue_client(queue_name)
             queue_client.delete_message(message_id, pop_receipt)
-            QueueState.update_status_by_message_id(message_id, "completed")
+            QueueState.delete_by_message_id(message_id)
             logger.info(f"user: {username} delete message from queue: {queue_name}")
             return {"msg": "success", "code": 200}
         except Exception as e:
@@ -298,4 +368,5 @@ class TaskQueue(GlobalResource):
 
 system_api.add_resource(TaskQueue, "/task_queue")
 system_api.add_resource(QueueState, "/queue_state")
+system_api.add_resource(QueueStats, "/queue_stats")
 
