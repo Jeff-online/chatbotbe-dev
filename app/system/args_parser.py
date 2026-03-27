@@ -95,6 +95,7 @@ class TaskQueuePostParser(BaseArgsParser):
         self.parser.add_argument('message', type=str, required=True, help="送信メッセージ")
         self.parser.add_argument('account_name', type=str, help="アカウント名")
         self.parser.add_argument('attachment_names', type=str, action="append", help="添付ファイル名リスト")
+        self.parser.add_argument('session_id', type=str, help="セッションID")
 
 
 class TaskQueuePutParser(BaseArgsParser):

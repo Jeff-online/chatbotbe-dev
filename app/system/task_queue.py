@@ -258,7 +258,7 @@ class QueueStats(GlobalResource):
 
 
 class TaskQueue(GlobalResource):
-    HEAVY_QUEUE_THRESHOLD = 5000
+    HEAVY_QUEUE_THRESHOLD = 50000
 
     @staticmethod
     def _get_queue_client(queue_name: str) -> QueueClient:
@@ -275,6 +275,7 @@ class TaskQueue(GlobalResource):
         message_content = args.get("message")
         account_name = args.get("account_name")
         attachment_names = args.get("attachment_names")
+        session_id = args.get("session_id")
 
         if not username:
             raise messages.UserNameNotExistsError
@@ -301,7 +302,8 @@ class TaskQueue(GlobalResource):
             "create_time": create_time,
             "status": status,
             "message": message_content,
-            "attachment_names": attachment_names if attachment_names else []
+            "attachment_names": attachment_names if attachment_names else [],
+            "session_id": session_id
         }
         message_json = json.dumps(message_payload)
 
@@ -321,7 +323,7 @@ class TaskQueue(GlobalResource):
                 pop_receipt=send_result.pop_receipt,
                 status=status,
                 account_name=account_name,
-                session_id=None
+                session_id=session_id
             )
             logger.info(f"✅ Created queue record {queue_state_id} for user {username}")
             logger.info(f"user: {username} send message to queue: {queue_name}")
