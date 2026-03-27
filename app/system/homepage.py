@@ -344,45 +344,53 @@ class FileManagement(GlobalResource):
                 
                 queue_state_id = None
                 db_error = None
+                # 使用环境变量或默认值
+                connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+                
+                if not connection_string:
+                    logger.error(f"❗️ AZURE_STORAGE_CONNECTION_STRING NOT configured! Cannot create queue record for {file.filename}")
+                    return {
+                        'msg': 'File uploaded to Blob but failed to create queue record due to missing configuration',
+                        'filename': file.filename,
+                        'queue_state_id': None,
+                        'code': 500
+                    }
+                
                 try:
-                    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-                    if connection_string:
-                        from azure.storage.queue import QueueClient
-                        from azure.core.exceptions import ResourceExistsError
-                        queue_client = QueueClient.from_connection_string(connection_string, queue_name)
+                    from azure.storage.queue import QueueClient
+                    from azure.core.exceptions import ResourceExistsError
+                    queue_client = QueueClient.from_connection_string(connection_string, queue_name)
+                    try:
+                        queue_client.create_queue()
+                    except ResourceExistsError as e:
+                        logger.warning(f"Queue {queue_name} already exists: {e}")
+                        pass
+                    send_result = queue_client.send_message(message_json)
+                    logger.info(f"✅ Queue message sent successfully, message_id: {send_result.id}")
+                    
+                    from task_queue import QueueState
+                    try:
+                        queue_state_id = QueueState.create(
+                            username=username,
+                            queue_name=queue_name,
+                            message=message_json,
+                            message_id=send_result.id,
+                            status="queued",
+                            account_name=username,
+                            session_id=None
+                        )
+                        logger.info(f"✅ Queue state created successfully, queue_state_id: {queue_state_id}")
+                    except Exception as db_error:
+                        logger.error(f"❌ Failed to create database record: {db_error}", exc_info=True)
+                        # 数据库失败时，回滚队列消息
                         try:
-                            queue_client.create_queue()
-                        except ResourceExistsError as e:
-                            logger.warning(f"Queue {queue_name} already exists: {e}")
+                            queue_client.delete_message(send_result.id, send_result.pop_receipt)
+                            logger.warning(f"⚠️ Rolled back queue message due to DB failure")
+                        except:
                             pass
-                        send_result = queue_client.send_message(message_json)
-                        logger.info(f"✅ Queue message sent successfully, message_id: {send_result.id}")
-                        
-                        from task_queue import QueueState
-                        try:
-                            queue_state_id = QueueState.create(
-                                username=username,
-                                queue_name=queue_name,
-                                message=message_json,
-                                message_id=send_result.id,
-                                status="queued",
-                                account_name=username,
-                                session_id=None
-                            )
-                            logger.info(f"✅ Queue state created successfully, queue_state_id: {queue_state_id}")
-                        except Exception as db_error:
-                            logger.error(f"❌ Failed to create database record: {db_error}", exc_info=True)
-                            # 数据库失败时，回滚队列消息
-                            try:
-                                queue_client.delete_message(send_result.id, send_result.pop_receipt)
-                                logger.warning(f"⚠️ Rolled back queue message due to DB failure")
-                            except:
-                                pass
-                            raise Exception(f"Database insert failed: {db_error}")
-                        
-                        logger.info(f"✅ user: {username} uploaded file and created queue record: {file.filename}")
-                    else:
-                        logger.error(f"❗️ AZURE_STORAGE_CONNECTION_STRING NOT configured! Skipping queue record creation for {file.filename}")
+                        raise Exception(f"Database insert failed: {db_error}")
+                    
+                    logger.info(f"✅ user: {username} uploaded file and created queue record: {file.filename}")
                 except Exception as queue_error:
                     logger.error(f"❗️ Failed to create queue/db record for {file.filename}: {queue_error}", exc_info=True)
                     # 如果是数据库错误，返回特定错误码
