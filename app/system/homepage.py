@@ -13,6 +13,8 @@ from utils.file_utils import FileOperation, cal_tokens
 from .args_parser import CheckTokenParser
 from werkzeug.utils import secure_filename
 from common.common_resource import GlobalResource, Resource
+import json
+from .task_queue import TaskQueue, QueueState
 logger = logging.getLogger(__name__)
 
 
@@ -321,21 +323,76 @@ class FileManagement(GlobalResource):
         args = args_parser.parser.parse_args()
         username = args.get("username")
         file = args.get("file")
+        session_id = args.get("session_id")
         if not username:
             raise messages.UserNameNotExistsError
         if file and self.allowed_file(file.filename):
             try:
+                # 1. Upload to Blob Storage
                 blob_client = current_app.container_client.get_blob_client(f"{username}/{file.filename}")
                 blob_client.upload_blob(file.stream, overwrite=True)
+                logger.info(f"File '{file.filename}' uploaded successfully to Azure Blob Storage")
 
-                logger.info(f"File '{file.filename}' uploaded successfully with description")
+                # 2. Determine Queue (Light vs Heavy)
+                attachment_names = [file.filename]
+                token_result = cal_tokens(username, attachment_names)
+                total_tokens = token_result.get("total_tokens", 0)
+                
+                queue_name = "heavy-queue" if total_tokens > TaskQueue.HEAVY_QUEUE_THRESHOLD else "light-queue"
+                
+                # 3. Send message to Azure Queue
+                create_time = datetime.now().isoformat()
+                status = "queued"
+                message_payload = {
+                    "account_name": None,
+                    "queue_name": queue_name,
+                    "user-name": username,
+                    "create_time": create_time,
+                    "status": status,
+                    "message": f"File uploaded: {file.filename}",
+                    "attachment_names": attachment_names
+                }
+                message_json = json.dumps(message_payload)
+                
+                try:
+                    # 获取 QueueClient
+                    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+                    from azure.storage.queue import QueueClient
+                    from azure.core.exceptions import ResourceExistsError
+                    queue_client = QueueClient.from_connection_string(connection_string, queue_name)
+                    try:
+                        queue_client.create_queue()
+                    except ResourceExistsError:
+                        pass
+                    
+                    send_result = queue_client.send_message(message_json)
+                    logger.info(f"✅ Sent message to queue {queue_name} for file {file.filename}, message_id: {send_result.id}")
+                    
+                    # 4. Create QueueState record in Cosmos DB
+                    queue_state_id = QueueState.create(
+                        username=username,
+                        queue_name=queue_name,
+                        message=message_json,
+                        message_id=send_result.id,
+                        pop_receipt=send_result.pop_receipt,
+                        status=status,
+                        session_id=session_id
+                    )
+                    logger.info(f"✅ Created queue state record {queue_state_id} for file {file.filename}")
+                    
+                except Exception as queue_err:
+                    logger.error(f"❌ Failed to handle queue/database operations: {queue_err}")
+                    # Even if queue fails, blob is already uploaded. 
+                    # We might want to notify user or handle it.
+
                 return {
-                    'message': f"File '{file.filename}' uploaded successfully with description",
+                    'message': f"File '{file.filename}' uploaded successfully",
                     'file_path': f"{username}/{file.filename}",
-                    'filename': file.filename,  # 明确返回文件名
+                    'filename': file.filename,
                     "code": 200
                 }
             except Exception as e:
+                logger.error(f"❌ Azure upload failed: {str(e)}")
                 return {'msg': f"Azure upload failed: {str(e)}", "code": 417}
 
         return {'msg': 'Invalid file type', "code": 400}
@@ -379,18 +436,39 @@ class FileManagement(GlobalResource):
             raise messages.UserNameNotExistsError
         if filename:
             try:
+                # 1. Delete Blob
                 blob_client = current_app.container_client.get_blob_client(f"{username}/{filename}")
                 blob_client.delete_blob()
-                logger.info( f"user: {filename}\n option: File deleted successfully")
+                logger.info(f"user: {username}\n option: File '{filename}' deleted from blob successfully")
+                
+                # 2. Delete Queue Message and Cosmos Record
+                try:
+                    QueueState.delete_by_filename(username, filename)
+                    logger.info(f"✅ Deleted queue records and messages for user {username}, file {filename}")
+                except Exception as q_err:
+                    logger.error(f"❌ Failed to delete queue records for file {filename}: {q_err}")
+
                 return {"msg": f"{filename}ファイルの削除が成功しました", "code": 200}
             except Exception as e:
                 return {"msg": f"{filename}ファイルが存在しないか、削除された", "code": 200}
         else:
             try:
+                # Delete all blobs for user
                 blobs_to_delete = list(current_app.container_client.list_blobs(name_starts_with=username))
                 if blobs_to_delete:
                     current_app.container_client.delete_blobs(*[blob.name for blob in blobs_to_delete])
-                    return {"msg": f"{filename}ファイルの削除が成功しました", "code": 200}
+                    
+                    # Also delete all queue records/messages for this user
+                    # We can iterate through blobs or just call a general delete for the user
+                    for blob in blobs_to_delete:
+                        # Extract just the filename from blob.name (which is "username/filename")
+                        fname = blob.name.split("/")[-1] if "/" in blob.name else blob.name
+                        try:
+                            QueueState.delete_by_filename(username, fname)
+                        except:
+                            pass
+                            
+                    return {"msg": "すべてのファイルの削除が成功しました", "code": 200}
                 else:
                     return {"msg": "ファイルが存在しないか、削除された", "code": 200}
             except Exception as e:
