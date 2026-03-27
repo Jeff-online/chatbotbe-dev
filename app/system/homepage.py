@@ -4,7 +4,6 @@ import uuid
 import shutil
 import chardet
 import logging
-import json
 from app import messages
 from . import system_api
 from . args_parser import *
@@ -329,89 +328,11 @@ class FileManagement(GlobalResource):
                 blob_client = current_app.container_client.get_blob_client(f"{username}/{file.filename}")
                 blob_client.upload_blob(file.stream, overwrite=True)
 
-                # 创建队列记录
-                queue_name = "light-queue"
-                message_payload = {
-                    "account_name": username,
-                    "queue_name": queue_name,
-                    "user-name": username,
-                    "create_time": datetime.now().isoformat(),
-                    "status": "queued",
-                    "message": f"File uploaded: {file.filename}",
-                    "attachment_names": [file.filename]
-                }
-                message_json = json.dumps(message_payload)
-                
-                queue_state_id = None
-                db_error = None
-                # 使用环境变量或默认值
-                connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-                
-                if not connection_string:
-                    logger.error(f"❗️ AZURE_STORAGE_CONNECTION_STRING NOT configured! Cannot create queue record for {file.filename}")
-                    return {
-                        'msg': 'File uploaded to Blob but failed to create queue record due to missing configuration',
-                        'filename': file.filename,
-                        'queue_state_id': None,
-                        'code': 500
-                    }
-                
-                try:
-                    from azure.storage.queue import QueueClient
-                    from azure.core.exceptions import ResourceExistsError
-                    queue_client = QueueClient.from_connection_string(connection_string, queue_name)
-                    try:
-                        queue_client.create_queue()
-                    except ResourceExistsError as e:
-                        logger.warning(f"Queue {queue_name} already exists: {e}")
-                        pass
-                    send_result = queue_client.send_message(message_json)
-                    logger.info(f"✅ Queue message sent successfully, message_id: {send_result.id}")
-                    
-                    # 动态导入以避免循环引用
-                    from .task_queue import QueueState
-                    try:
-                        logger.info(f"🔵 Attempting to create DB record for message {send_result.id}...")
-                        queue_state_id = QueueState.create(
-                            username=username,
-                            queue_name=queue_name,
-                            message=message_json,
-                            message_id=send_result.id,
-                            pop_receipt=send_result.pop_receipt,
-                            status="queued",
-                            account_name=username,
-                            session_id=None
-                        )
-                        if queue_state_id:
-                            logger.info(f"✅ Queue state created successfully, queue_state_id: {queue_state_id}")
-                        else:
-                            logger.error(f"❌ QueueState.create returned None!")
-                            raise Exception("QueueState.create returned None (retries failed)")
-                    except Exception as db_error:
-                        logger.error(f"❌ Failed to create database record: {db_error}", exc_info=True)
-                        # 数据库失败时，回滚队列消息
-                        try:
-                            logger.warning(f"⚠️ Rolling back queue message {send_result.id} due to DB failure...")
-                            queue_client.delete_message(send_result.id, send_result.pop_receipt)
-                            logger.warning(f"✅ Rolled back queue message successfully")
-                        except Exception as rollback_error:
-                            logger.error(f"❌ Failed to rollback queue message: {rollback_error}")
-                        raise Exception(f"Database insert failed: {db_error}")
-                    
-                    logger.info(f"✅ user: {username} uploaded file and created queue record: {file.filename}")
-                except Exception as queue_error:
-                    logger.error(f"❗️ Failed to create queue/db record for {file.filename}: {queue_error}", exc_info=True)
-                    # 如果是数据库错误，返回特定错误码
-                    if "Database" in str(queue_error) or "container" in str(queue_error).lower():
-                        return {'msg': f'File uploaded but failed to create database record: {str(queue_error)}', 'code': 417}
-                    return {'msg': f'Failed to create queue record: {str(queue_error)}', 'code': 417}
-
                 logger.info(f"File '{file.filename}' uploaded successfully with description")
                 return {
                     'message': f"File '{file.filename}' uploaded successfully with description",
                     'file_path': f"{username}/{file.filename}",
-                    'filename': file.filename,
-                    'queue_state_id': queue_state_id,
+                    'filename': file.filename,  # 明确返回文件名
                     "code": 200
                 }
             except Exception as e:
@@ -458,13 +379,6 @@ class FileManagement(GlobalResource):
             raise messages.UserNameNotExistsError
         if filename:
             try:
-                # 尝试删除相关的队列记录和消息
-                try:
-                    from .task_queue import QueueState
-                    QueueState.delete_by_filename(username, filename)
-                except Exception as e:
-                    logger.warning(f"Failed to delete queue record for {filename}: {e}")
-
                 blob_client = current_app.container_client.get_blob_client(f"{username}/{filename}")
                 blob_client.delete_blob()
                 logger.info( f"user: {filename}\n option: File deleted successfully")
@@ -509,7 +423,7 @@ class CheckToken(GlobalResource):
             if isinstance(deploy_model, str):
                 norm = deploy_model.strip().lower()
                 if norm in ("both", "all"):
-                    models = ["gpt-4o", "gpt-5"]
+                    models = ["gpt-4o", "gpt-5.2"]
                 elif "," in norm:
                     models = [m.strip() for m in norm.split(",") if m.strip()]
                 else:
@@ -558,5 +472,3 @@ class CheckToken(GlobalResource):
 system_api.add_resource(SessionManagement, "/session_management")
 system_api.add_resource(FileManagement, "/upload_file")
 system_api.add_resource(CheckToken, "/check_token")
-
-
