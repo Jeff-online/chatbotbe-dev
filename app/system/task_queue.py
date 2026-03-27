@@ -150,19 +150,39 @@ class QueueStats(GlobalResource):
         total_pending = 0
         light_queue_pending = 0
         heavy_queue_pending = 0
+        light_attachment_names = []
+        heavy_attachment_names = []
         
         for item in items:
             q_name = item.get("queue_name", "")
+            message_data = item.get("message", {})
+            
+            # Parse message JSON if it's a string
+            if isinstance(message_data, str):
+                try:
+                    message_data = json.loads(message_data)
+                except:
+                    pass
+            
+            # Extract attachment names from message
+            attachment_names = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
+            
             total_pending += 1
             if q_name == "light-queue":
                 light_queue_pending += 1
+                if attachment_names:
+                    light_attachment_names.extend(attachment_names)
             elif q_name == "heavy-queue":
                 heavy_queue_pending += 1
+                if attachment_names:
+                    heavy_attachment_names.extend(attachment_names)
         
         return {
             "total_pending": total_pending,
             "light_queue_pending": light_queue_pending,
             "heavy_queue_pending": heavy_queue_pending,
+            "light_attachment_names": light_attachment_names,
+            "heavy_attachment_names": heavy_attachment_names,
             "code": 200
         }
 
