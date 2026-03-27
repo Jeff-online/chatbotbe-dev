@@ -12,7 +12,6 @@ from flask import current_app
 from datetime import datetime, timedelta
 from utils.file_utils import FileOperation, cal_tokens
 from .args_parser import CheckTokenParser
-from .task_queue import QueueState
 from werkzeug.utils import secure_filename
 from common.common_resource import GlobalResource, Resource
 logger = logging.getLogger(__name__)
@@ -369,8 +368,10 @@ class FileManagement(GlobalResource):
                     send_result = queue_client.send_message(message_json)
                     logger.info(f"✅ Queue message sent successfully, message_id: {send_result.id}")
                     
-                    
+                    # 动态导入以避免循环引用
+                    from .task_queue import QueueState
                     try:
+                        logger.info(f"🔵 Attempting to create DB record for message {send_result.id}...")
                         queue_state_id = QueueState.create(
                             username=username,
                             queue_name=queue_name,
@@ -381,15 +382,20 @@ class FileManagement(GlobalResource):
                             account_name=username,
                             session_id=None
                         )
-                        logger.info(f"✅ Queue state created successfully, queue_state_id: {queue_state_id}")
+                        if queue_state_id:
+                            logger.info(f"✅ Queue state created successfully, queue_state_id: {queue_state_id}")
+                        else:
+                            logger.error(f"❌ QueueState.create returned None!")
+                            raise Exception("QueueState.create returned None (retries failed)")
                     except Exception as db_error:
                         logger.error(f"❌ Failed to create database record: {db_error}", exc_info=True)
                         # 数据库失败时，回滚队列消息
                         try:
+                            logger.warning(f"⚠️ Rolling back queue message {send_result.id} due to DB failure...")
                             queue_client.delete_message(send_result.id, send_result.pop_receipt)
-                            logger.warning(f"⚠️ Rolled back queue message due to DB failure")
-                        except:
-                            pass
+                            logger.warning(f"✅ Rolled back queue message successfully")
+                        except Exception as rollback_error:
+                            logger.error(f"❌ Failed to rollback queue message: {rollback_error}")
                         raise Exception(f"Database insert failed: {db_error}")
                     
                     logger.info(f"✅ user: {username} uploaded file and created queue record: {file.filename}")

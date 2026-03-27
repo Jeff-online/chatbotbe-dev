@@ -116,42 +116,52 @@ class QueueState(GlobalResource):
     @staticmethod
     def delete_by_filename(username: str, filename: str) -> None:
         """根据用户名和文件名删除待处理的队列记录和消息"""
+        logger.info(f"🔵 Attempting to delete queue record and message for user: {username}, file: {filename}")
         query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status = 'queued'"
         params = [{"name": "@username", "value": username}]
-        items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
-        
-        for item in items:
-            message_data = item.get("message", {})
-            if isinstance(message_data, str):
-                try:
-                    message_data = json.loads(message_data)
-                except:
-                    continue
+        try:
+            items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+            logger.info(f"🔍 Found {len(items)} queued records for user {username}")
             
-            attachments = message_data.get("attachment_names", [])
-            if filename in attachments:
-                # 找到匹配的记录
-                message_id = item.get("message_id")
-                pop_receipt = item.get("pop_receipt")
-                queue_name = item.get("queue_name")
-                
-                # 从 Azure Queue 中删除消息
-                if message_id and pop_receipt and queue_name:
+            for item in items:
+                message_data = item.get("message", {})
+                if isinstance(message_data, str):
                     try:
-                        connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-                        if connection_string:
-                            from azure.storage.queue import QueueClient
-                            queue_client = QueueClient.from_connection_string(connection_string, queue_name)
-                            queue_client.delete_message(message_id, pop_receipt)
-                            logger.info(f"✅ Deleted message {message_id} from queue {queue_name} for file {filename}")
+                        message_data = json.loads(message_data)
                     except Exception as e:
-                        logger.warning(f"⚠️ Failed to delete message from queue: {e}")
+                        logger.error(f"❌ Failed to parse message JSON in record {item.get('id')}: {e}")
+                        continue
                 
-                # 从 Cosmos DB 中删除记录
-                doc_id = item.get("id")
-                if doc_id:
-                    current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
-                    logger.info(f"✅ Deleted queue state record {doc_id} for file {filename}")
+                attachments = message_data.get("attachment_names", [])
+                logger.info(f"   Checking record {item.get('id')}, attachments: {attachments}")
+                if filename in attachments:
+                    # 找到匹配的记录
+                    message_id = item.get("message_id")
+                    pop_receipt = item.get("pop_receipt")
+                    queue_name = item.get("queue_name")
+                    
+                    # 从 Azure Queue 中删除消息
+                    if message_id and pop_receipt and queue_name:
+                        try:
+                            connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+                            if connection_string:
+                                from azure.storage.queue import QueueClient
+                                queue_client = QueueClient.from_connection_string(connection_string, queue_name)
+                                queue_client.delete_message(message_id, pop_receipt)
+                                logger.info(f"✅ Deleted message {message_id} from queue {queue_name} for file {filename}")
+                            else:
+                                logger.error("❌ AZURE_STORAGE_CONNECTION_STRING not set, cannot delete queue message")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to delete message from queue: {e}")
+                    
+                    # 从 Cosmos DB 中删除记录
+                    doc_id = item.get("id")
+                    if doc_id:
+                        current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
+                        logger.info(f"✅ Deleted queue state record {doc_id} for file {filename}")
+        except Exception as e:
+            logger.error(f"❌ Error during delete_by_filename: {e}", exc_info=True)
+            raise e
 
     def get(self):
         args_parser = QueueStateGetParser()
@@ -352,6 +362,7 @@ class TaskQueue(GlobalResource):
                 account_name=account_name,
                 session_id=None
             )
+            logger.info(f"✅ Created queue record {queue_state_id} for user {username}")
             logger.info(f"user: {username} send message to queue: {queue_name}")
             return {
                 "message_id": send_result.id,
