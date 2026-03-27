@@ -343,6 +343,7 @@ class FileManagement(GlobalResource):
                 message_json = json.dumps(message_payload)
                 
                 queue_state_id = None
+                db_error = None
                 try:
                     connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
                     if connection_string:
@@ -355,25 +356,39 @@ class FileManagement(GlobalResource):
                             logger.warning(f"Queue {queue_name} already exists: {e}")
                             pass
                         send_result = queue_client.send_message(message_json)
-                        logger.info(f"Queue message sent successfully, message_id: {send_result.id}")
+                        logger.info(f"✅ Queue message sent successfully, message_id: {send_result.id}")
                         
                         from task_queue import QueueState
-                        queue_state_id = QueueState.create(
-                            username=username,
-                            queue_name=queue_name,
-                            message=message_json,
-                            message_id=send_result.id,
-                            status="queued",
-                            account_name=username,
-                            session_id=None
-                        )
-                        logger.info(f"Queue state created successfully, queue_state_id: {queue_state_id}")
+                        try:
+                            queue_state_id = QueueState.create(
+                                username=username,
+                                queue_name=queue_name,
+                                message=message_json,
+                                message_id=send_result.id,
+                                status="queued",
+                                account_name=username,
+                                session_id=None
+                            )
+                            logger.info(f"✅ Queue state created successfully, queue_state_id: {queue_state_id}")
+                        except Exception as db_error:
+                            logger.error(f"❌ Failed to create database record: {db_error}", exc_info=True)
+                            # 数据库失败时，回滚队列消息
+                            try:
+                                queue_client.delete_message(send_result.id, send_result.pop_receipt)
+                                logger.warning(f"⚠️ Rolled back queue message due to DB failure")
+                            except:
+                                pass
+                            raise Exception(f"Database insert failed: {db_error}")
                         
-                        logger.info(f"user: {username} uploaded file and created queue record: {file.filename}")
+                        logger.info(f"✅ user: {username} uploaded file and created queue record: {file.filename}")
                     else:
                         logger.error(f"❗️ AZURE_STORAGE_CONNECTION_STRING NOT configured! Skipping queue record creation for {file.filename}")
                 except Exception as queue_error:
-                    logger.error(f"❗️ Failed to create queue record for {file.filename}: {queue_error}", exc_info=True)
+                    logger.error(f"❗️ Failed to create queue/db record for {file.filename}: {queue_error}", exc_info=True)
+                    # 如果是数据库错误，返回特定错误码
+                    if "Database" in str(queue_error) or "container" in str(queue_error).lower():
+                        return {'msg': f'File uploaded but failed to create database record: {str(queue_error)}', 'code': 417}
+                    return {'msg': f'Failed to create queue record: {str(queue_error)}', 'code': 417}
 
                 logger.info(f"File '{file.filename}' uploaded successfully with description")
                 return {

@@ -34,12 +34,28 @@ class QueueState(GlobalResource):
             }
             if session_id:
                 item["session_id"] = session_id
-            logger.info(f"Creating queue state item with id: {doc_id}")
-            current_app.container_task_queue.create_item(body=item)
-            logger.info(f"Queue state item created successfully in database")
+            
+            logger.info(f"🔵 Creating queue state item with id: {doc_id}")
+            logger.info(f"🔵 Item data: {json.dumps(item, indent=2)}")
+            logger.info(f"🔵 Using container: {current_app.container_task_queue.id}")
+            
+            # 检查容器是否存在
+            try:
+                current_app.container_task_queue.read()
+                logger.info(f"✅ Container {current_app.container_task_queue.id} exists and is accessible")
+            except Exception as container_error:
+                logger.error(f"❌ Container read failed: {container_error}")
+                raise Exception(f"Container not accessible: {container_error}")
+            
+            # 尝试创建 item
+            result = current_app.container_task_queue.create_item(body=item)
+            logger.info(f"✅ Queue state item created successfully in database")
+            logger.info(f"✅ Create result: {result.get('id', 'unknown')}")
             return doc_id
         except Exception as e:
-            logger.error(f"Failed to create queue state in database: {e}", exc_info=True)
+            logger.error(f"❌ Failed to create queue state in database: {e}", exc_info=True)
+            logger.error(f"❌ Error type: {type(e).__name__}")
+            logger.error(f"❌ Error args: {e.args}")
             raise
 
     @staticmethod
