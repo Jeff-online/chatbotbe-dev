@@ -20,78 +20,39 @@ class QueueState(GlobalResource):
     @staticmethod
     def create(username: str, queue_name: str, message: str, message_id: str, status: str, account_name: str = None, session_id: str = None, pop_receipt: str = None) -> str:
         """
-        创建队列状态记录（带重试机制）
+        创建队列状态记录
         """
-        from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosTimeoutException
+        logger.info(f"🔵 QueueState.create started for user: {username}, message_id: {message_id}")
         
-        max_retries = 3
-        retry_count = 0
-        last_error = None
-        
-        while retry_count < max_retries:
-            try:
-                doc_id = str(uuid.uuid4())
-                item = {
-                    "id": doc_id,
-                    "type": "queue_state",
-                    "username": username,
-                    "queue_name": queue_name,
-                    "message": message,
-                    "message_id": message_id,
-                    "pop_receipt": pop_receipt,
-                    "status": status,
-                    "account_name": account_name,
-                    "create_time": datetime.now().isoformat()
-                }
-                if session_id:
-                    item["session_id"] = session_id
-                
-                logger.info(f"🔵 Creating queue state item with id: {doc_id} (attempt {retry_count + 1}/{max_retries})")
-                logger.info(f"🔵 Item data: {json.dumps(item, indent=2)}")
-                logger.info(f"🔵 Using container: {current_app.container_task_queue.id}")
-                
-                # 检查容器是否存在
-                try:
-                    current_app.container_task_queue.read()
-                    logger.info(f"✅ Container {current_app.container_task_queue.id} exists and is accessible")
-                except Exception as container_error:
-                    logger.error(f"❌ Container read failed: {container_error}")
-                    raise Exception(f"Container not accessible: {container_error}")
-                
-                # 尝试创建 item
-                result = current_app.container_task_queue.create_item(body=item)
-                logger.info(f"✅ Queue state item created successfully in database")
-                logger.info(f"✅ Create result: {result.get('id', 'unknown')}")
-                return doc_id
-                
-            except (CosmosTimeoutException, CosmosHttpResponseError) as e:
-                retry_count += 1
-                last_error = e
-                status_code = getattr(e, 'status_code', 'N/A')
-                logger.warning(f"⚠️ Cosmos DB write failed (attempt {retry_count}/{max_retries}): {e}")
-                logger.warning(f"   Status code: {status_code}")
-                
-                if retry_count < max_retries:
-                    import time
-                    wait_time = retry_count * 2  # 指数退避：2s, 4s, 6s
-                    logger.info(f"   Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"❌ Max retries reached. Giving up.")
-                    break
-            except Exception as e:
-                # 非超时错误，直接抛出
-                logger.error(f"❌ Failed to create queue state in database: {e}", exc_info=True)
-                logger.error(f"❌ Error type: {type(e).__name__}")
-                logger.error(f"❌ Error args: {e.args}")
-                raise
-        
-        # 所有重试都失败
-        if last_error:
-            logger.error(f"❌ Final failure after {max_retries} retries: {last_error}", exc_info=True)
-            raise Exception(f"Failed to create queue state after {max_retries} retries: {last_error}")
-        
-        return None
+        try:
+            doc_id = str(uuid.uuid4())
+            item = {
+                "id": doc_id,
+                "type": "queue_state",
+                "username": username,
+                "queue_name": queue_name,
+                "message": message,
+                "message_id": message_id,
+                "pop_receipt": pop_receipt,
+                "status": status,
+                "account_name": account_name,
+                "create_time": datetime.now().isoformat()
+            }
+            if session_id:
+                item["session_id"] = session_id
+            
+            if not hasattr(current_app, 'container_task_queue') or current_app.container_task_queue is None:
+                logger.error("❌ current_app.container_task_queue is NOT initialized!")
+                raise Exception("Cosmos DB container not initialized in current_app")
+            
+            # 直接尝试创建 item，不再进行冗余的 container.read() 检查
+            result = current_app.container_task_queue.create_item(body=item)
+            logger.info(f"✅ Queue state item created successfully in database, id: {result.get('id')}")
+            return doc_id
+            
+        except Exception as e:
+            logger.error(f"❌ Error in QueueState.create: {e}", exc_info=True)
+            raise
 
     @staticmethod
     def update_status_by_message_id(message_id: str, status: str) -> None:
