@@ -19,22 +19,28 @@ class QueueState(GlobalResource):
 
     @staticmethod
     def create(username: str, queue_name: str, message: str, message_id: str, status: str, account_name: str = None, session_id: str = None) -> str:
-        doc_id = str(uuid.uuid4())
-        item = {
-            "id": doc_id,
-            "type": "queue_state",
-            "username": username,
-            "queue_name": queue_name,
-            "message": message,
-            "message_id": message_id,
-            "status": status,
-            "account_name": account_name,
-            "create_time": datetime.now().isoformat()
-        }
-        if session_id:
-            item["session_id"] = session_id
-        current_app.container_task_queue.create_item(body=item)
-        return doc_id
+        try:
+            doc_id = str(uuid.uuid4())
+            item = {
+                "id": doc_id,
+                "type": "queue_state",
+                "username": username,
+                "queue_name": queue_name,
+                "message": message,
+                "message_id": message_id,
+                "status": status,
+                "account_name": account_name,
+                "create_time": datetime.now().isoformat()
+            }
+            if session_id:
+                item["session_id"] = session_id
+            logger.info(f"Creating queue state item with id: {doc_id}")
+            current_app.container_task_queue.create_item(body=item)
+            logger.info(f"Queue state item created successfully in database")
+            return doc_id
+        except Exception as e:
+            logger.error(f"Failed to create queue state in database: {e}", exc_info=True)
+            raise
 
     @staticmethod
     def update_status_by_message_id(message_id: str, status: str) -> None:

@@ -4,6 +4,7 @@ import uuid
 import shutil
 import chardet
 import logging
+import json
 from app import messages
 from . import system_api
 from . args_parser import *
@@ -328,11 +329,58 @@ class FileManagement(GlobalResource):
                 blob_client = current_app.container_client.get_blob_client(f"{username}/{file.filename}")
                 blob_client.upload_blob(file.stream, overwrite=True)
 
+                # 创建队列记录
+                queue_name = "light-queue"
+                message_payload = {
+                    "account_name": username,
+                    "queue_name": queue_name,
+                    "user-name": username,
+                    "create_time": datetime.now().isoformat(),
+                    "status": "queued",
+                    "message": f"File uploaded: {file.filename}",
+                    "attachment_names": [file.filename]
+                }
+                message_json = json.dumps(message_payload)
+                
+                queue_state_id = None
+                try:
+                    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+                    if connection_string:
+                        from azure.storage.queue import QueueClient
+                        from azure.core.exceptions import ResourceExistsError
+                        queue_client = QueueClient.from_connection_string(connection_string, queue_name)
+                        try:
+                            queue_client.create_queue()
+                        except ResourceExistsError as e:
+                            logger.warning(f"Queue {queue_name} already exists: {e}")
+                            pass
+                        send_result = queue_client.send_message(message_json)
+                        logger.info(f"Queue message sent successfully, message_id: {send_result.id}")
+                        
+                        from task_queue import QueueState
+                        queue_state_id = QueueState.create(
+                            username=username,
+                            queue_name=queue_name,
+                            message=message_json,
+                            message_id=send_result.id,
+                            status="queued",
+                            account_name=username,
+                            session_id=None
+                        )
+                        logger.info(f"Queue state created successfully, queue_state_id: {queue_state_id}")
+                        
+                        logger.info(f"user: {username} uploaded file and created queue record: {file.filename}")
+                    else:
+                        logger.error(f"❗️ AZURE_STORAGE_CONNECTION_STRING NOT configured! Skipping queue record creation for {file.filename}")
+                except Exception as queue_error:
+                    logger.error(f"❗️ Failed to create queue record for {file.filename}: {queue_error}", exc_info=True)
+
                 logger.info(f"File '{file.filename}' uploaded successfully with description")
                 return {
                     'message': f"File '{file.filename}' uploaded successfully with description",
                     'file_path': f"{username}/{file.filename}",
-                    'filename': file.filename,  # 明确返回文件名
+                    'filename': file.filename,
+                    'queue_state_id': queue_state_id,
                     "code": 200
                 }
             except Exception as e:
