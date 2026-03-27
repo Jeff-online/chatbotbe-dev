@@ -12,6 +12,7 @@ from flask import current_app
 from datetime import datetime, timedelta
 from utils.file_utils import FileOperation, cal_tokens
 from .args_parser import CheckTokenParser
+from .task_queue import QueueState
 from werkzeug.utils import secure_filename
 from common.common_resource import GlobalResource, Resource
 logger = logging.getLogger(__name__)
@@ -368,13 +369,14 @@ class FileManagement(GlobalResource):
                     send_result = queue_client.send_message(message_json)
                     logger.info(f"✅ Queue message sent successfully, message_id: {send_result.id}")
                     
-                    from task_queue import QueueState
+                    
                     try:
                         queue_state_id = QueueState.create(
                             username=username,
                             queue_name=queue_name,
                             message=message_json,
                             message_id=send_result.id,
+                            pop_receipt=send_result.pop_receipt,
                             status="queued",
                             account_name=username,
                             session_id=None
@@ -450,6 +452,13 @@ class FileManagement(GlobalResource):
             raise messages.UserNameNotExistsError
         if filename:
             try:
+                # 尝试删除相关的队列记录和消息
+                try:
+                    from .task_queue import QueueState
+                    QueueState.delete_by_filename(username, filename)
+                except Exception as e:
+                    logger.warning(f"Failed to delete queue record for {filename}: {e}")
+
                 blob_client = current_app.container_client.get_blob_client(f"{username}/{filename}")
                 blob_client.delete_blob()
                 logger.info( f"user: {filename}\n option: File deleted successfully")

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class QueueState(GlobalResource):
 
     @staticmethod
-    def create(username: str, queue_name: str, message: str, message_id: str, status: str, account_name: str = None, session_id: str = None) -> str:
+    def create(username: str, queue_name: str, message: str, message_id: str, status: str, account_name: str = None, session_id: str = None, pop_receipt: str = None) -> str:
         """
         创建队列状态记录（带重试机制）
         """
@@ -38,6 +38,7 @@ class QueueState(GlobalResource):
                     "queue_name": queue_name,
                     "message": message,
                     "message_id": message_id,
+                    "pop_receipt": pop_receipt,
                     "status": status,
                     "account_name": account_name,
                     "create_time": datetime.now().isoformat()
@@ -112,6 +113,46 @@ class QueueState(GlobalResource):
             if doc_id:
                 current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
 
+    @staticmethod
+    def delete_by_filename(username: str, filename: str) -> None:
+        """根据用户名和文件名删除待处理的队列记录和消息"""
+        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status = 'queued'"
+        params = [{"name": "@username", "value": username}]
+        items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+        
+        for item in items:
+            message_data = item.get("message", {})
+            if isinstance(message_data, str):
+                try:
+                    message_data = json.loads(message_data)
+                except:
+                    continue
+            
+            attachments = message_data.get("attachment_names", [])
+            if filename in attachments:
+                # 找到匹配的记录
+                message_id = item.get("message_id")
+                pop_receipt = item.get("pop_receipt")
+                queue_name = item.get("queue_name")
+                
+                # 从 Azure Queue 中删除消息
+                if message_id and pop_receipt and queue_name:
+                    try:
+                        connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+                        if connection_string:
+                            from azure.storage.queue import QueueClient
+                            queue_client = QueueClient.from_connection_string(connection_string, queue_name)
+                            queue_client.delete_message(message_id, pop_receipt)
+                            logger.info(f"✅ Deleted message {message_id} from queue {queue_name} for file {filename}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to delete message from queue: {e}")
+                
+                # 从 Cosmos DB 中删除记录
+                doc_id = item.get("id")
+                if doc_id:
+                    current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
+                    logger.info(f"✅ Deleted queue state record {doc_id} for file {filename}")
+
     def get(self):
         args_parser = QueueStateGetParser()
         args = args_parser.parser.parse_args()
@@ -169,6 +210,7 @@ class QueueState(GlobalResource):
         queue_name = args.get("queue_name")
         message = args.get("message")
         message_id = args.get("message_id")
+        pop_receipt = args.get("pop_receipt")
         status = args.get("status")
         session_id = args.get("session_id")
         doc_id = QueueState.create(
@@ -176,6 +218,7 @@ class QueueState(GlobalResource):
             queue_name=queue_name,
             message=message,
             message_id=message_id,
+            pop_receipt=pop_receipt,
             status=status,
             session_id=session_id
         )
@@ -286,7 +329,8 @@ class TaskQueue(GlobalResource):
             "user-name": username,
             "create_time": create_time,
             "status": status,
-            "message": message_content
+            "message": message_content,
+            "attachment_names": attachment_names if attachment_names else []
         }
         message_json = json.dumps(message_payload)
 
@@ -303,6 +347,7 @@ class TaskQueue(GlobalResource):
                 queue_name=queue_name,
                 message=message_json,
                 message_id=send_result.id,
+                pop_receipt=send_result.pop_receipt,
                 status=status,
                 account_name=account_name,
                 session_id=None

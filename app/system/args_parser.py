@@ -140,6 +140,8 @@ class QueueStatePostParser(BaseArgsParser):
         self.parser.add_argument('queue_name', type=str, required=True, help="キュー名")
         self.parser.add_argument('message', type=str, required=True, help="メッセージ内容")
         self.parser.add_argument('message_id', type=str, required=True, help="メッセージID")
+        self.parser.add_argument('pop_receipt', type=str, help="pop receipt")
         self.parser.add_argument('status', type=str, required=True, help="ステータス")
+        self.parser.add_argument('session_id', type=str, help="セッションID")
 
 
