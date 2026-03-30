@@ -932,9 +932,17 @@ class SubmitQueuedTasks(GlobalResource):
                         item['status'] = 'queued'
                         item['update_time'] = datetime.now().isoformat()
                         
+                        # 如果有传入新的 session_id，则更新
+                        if session_id:
+                            item['session_id'] = session_id
+                        
                         # 更新 message 内容
                         message_data['status'] = 'queued'
                         message_data['message'] = message_data.get('message', '').replace('(waiting for submit)', '')
+                        # 清理 message 内部的 session_id（如果有）
+                        if 'session_id' in message_data:
+                            del message_data['session_id']
+                            
                         item['message'] = json.dumps(message_data)
                         
                         current_app.container_task_queue.upsert_item(item)
