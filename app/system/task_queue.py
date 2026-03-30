@@ -11,7 +11,8 @@ from .args_parser import TaskQueuePostParser, TaskQueueDeleteParser, QueueStateG
 from flask import current_app
 from common.common_resource import GlobalResource
 from azure.storage.queue import QueueClient
-from azure.core.exceptions import ResourceExistsError, CosmosHttpResponseError
+from azure.core.exceptions import ResourceExistsError
+from azure.cosmos.exceptions import CosmosHttpResponseError
 from utils.file_utils import cal_tokens
 from azure.cosmos import CosmosClient
 
@@ -51,11 +52,12 @@ class QueueConcurrencyLock:
             raise
     
     @staticmethod
-    def acquire_lock(queue_name: str, message_id: str) -> bool:
+    def acquire_lock(queue_name: str, message_id: str, session_id: str = None) -> bool:
         """
         获取队列处理锁
         :param queue_name: 队列名称 (heavy-queue 或 light-queue)
         :param message_id: 消息 ID
+        :param session_id: 会话 ID
         :return: 是否成功获取锁
         """
         if queue_name == "heavy-queue":
@@ -109,6 +111,7 @@ class QueueConcurrencyLock:
                     # 有空闲槽位，尝试占用
                     new_slot = {
                         'message_id': message_id,
+                        'session_id': session_id,
                         'locked_at': current_time.isoformat(),
                         'occupied_by': os.environ.get("ACCOUNT_URL", "unknown")
                     }
@@ -661,8 +664,9 @@ class TaskQueue(GlobalResource):
         
         try:
             # 1. 获取锁（会阻塞直到获取到锁）
-            logger.info(f"🔵 开始为任务 {message_id} 获取{queue_name}锁...")
-            lock_acquired = QueueConcurrencyLock.acquire_lock(queue_name, message_id)
+            session_id = kwargs.get('session_id')
+            logger.info(f"🔵 开始为任务 {message_id} 获取{queue_name}锁 (session_id={session_id})...")
+            lock_acquired = QueueConcurrencyLock.acquire_lock(queue_name, message_id, session_id=session_id)
             
             if not lock_acquired:
                 logger.error(f"❌ 任务 {message_id} 获取锁失败")
@@ -1003,11 +1007,12 @@ class ProcessTaskWithLock(GlobalResource):
             username = data.get('username')
             queue_name = data.get('queue_name')
             message_id = data.get('message_id')
+            session_id = data.get('session_id')
             
             if not username:
                 raise messages.UserNameNotExistsError
             
-            logger.info(f"🔵 ProcessTaskWithLock: user={username}, queue={queue_name}, message_id={message_id}")
+            logger.info(f"🔵 ProcessTaskWithLock: user={username}, queue={queue_name}, message_id={message_id}, session_id={session_id}")
             
             # 定义实际的处理函数
             def actual_processor(message_data, attachments):
@@ -1015,7 +1020,7 @@ class ProcessTaskWithLock(GlobalResource):
                 实际的业务处理逻辑
                 这里应该调用你的 AI API 或其他处理逻辑
                 """
-                logger.info(f"⚙️ Processing: user={username}, attachments={attachments}")
+                logger.info(f"⚙️ Processing: user={username}, attachments={attachments}, session_id={session_id}")
                 
                 # TODO: 在这里实现你的业务逻辑
                 # 例如：调用 OpenAI API、处理文件等
@@ -1024,6 +1029,7 @@ class ProcessTaskWithLock(GlobalResource):
                 return {
                     'success': True,
                     'processed_files': attachments,
+                    'session_id': session_id,
                     'message': 'Task processed successfully'
                 }
             
@@ -1034,7 +1040,8 @@ class ProcessTaskWithLock(GlobalResource):
                 processor_func=lambda: actual_processor(data, [username]),
                 username=username,
                 attachment_names=[username],
-                message_data=data
+                message_data=data,
+                session_id=session_id
             )
             
             return {
@@ -1107,7 +1114,8 @@ def call_with_queue_lock(username: str, queue_name: str, message_id: str, attach
             processor_func=processor_func,
             username=username,
             attachment_names=attachment_names,
-            message_data=message_data
+            message_data=message_data,
+            session_id=message_data.get('session_id')
         )
         return result
     except Exception as e:
