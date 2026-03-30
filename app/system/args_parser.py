@@ -69,7 +69,6 @@ class FileParser(BaseArgsParser):
         super().__init__()
         self.parser.add_argument('username', type=str, location='form', required=True)
         self.parser.add_argument('file', type=FileStorage, location="files", required=True)
-        self.parser.add_argument('session_id', type=str, location='form', required=False)
 
 
 class FileDelete(BaseArgsParser):
