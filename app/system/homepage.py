@@ -333,62 +333,50 @@ class FileManagement(GlobalResource):
                 blob_client.upload_blob(file.stream, overwrite=True)
                 logger.info(f"File '{file.filename}' uploaded successfully to Azure Blob Storage")
 
-                # 2. Determine Queue (Light vs Heavy)
+                # 2. Determine Queue (Light vs Heavy) - ONLY PREPARE, DON'T SEND YET
                 attachment_names = [file.filename]
                 token_result = cal_tokens(username, attachment_names)
                 total_tokens = token_result.get("total_tokens", 0)
                 
                 queue_name = "heavy-queue" if total_tokens > TaskQueue.HEAVY_QUEUE_THRESHOLD else "light-queue"
                 
-                # 3. Send message to Azure Queue
+                # 3. Create Cosmos DB record with status='uploaded' (NOT queued yet)
                 create_time = datetime.now().isoformat()
-                status = "queued"
+                status = "uploaded"  # New status: file uploaded but not yet queued for processing
                 message_payload = {
                     "account_name": None,
                     "queue_name": queue_name,
                     "user-name": username,
                     "create_time": create_time,
                     "status": status,
-                    "message": f"File uploaded: {file.filename}",
-                    "attachment_names": attachment_names
+                    "message": f"File uploaded: {file.filename} (waiting for submit)",
+                    "attachment_names": attachment_names,
+                    "session_id": session_id
                 }
                 message_json = json.dumps(message_payload)
                 
-                try:
-                    # 获取 QueueClient
-                    connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-                    from azure.storage.queue import QueueClient
-                    from azure.core.exceptions import ResourceExistsError
-                    queue_client = QueueClient.from_connection_string(connection_string, queue_name)
-                    try:
-                        queue_client.create_queue()
-                    except ResourceExistsError:
-                        pass
-                    
-                    send_result = queue_client.send_message(message_json)
-                    logger.info(f"✅ Sent message to queue {queue_name} for file {file.filename}, message_id: {send_result.id}")
-                    
-                    # 4. Create QueueState record in Cosmos DB
-                    queue_state_id = QueueState.create(
-                        username=username,
-                        queue_name=queue_name,
-                        message=message_json,
-                        message_id=send_result.id,
-                        pop_receipt=send_result.pop_receipt,
-                        status=status,
-                        session_id=session_id
-                    )
-                    logger.info(f"✅ Created queue state record {queue_state_id} for file {file.filename}")
-                    
-                except Exception as queue_err:
-                    logger.error(f"❌ Failed to handle queue/database operations: {queue_err}")
-                    # Even if queue fails, blob is already uploaded. 
-                    # We might want to notify user or handle it.
-
+                # Generate a temporary ID (will be replaced when actually queued)
+                temp_message_id = str(uuid.uuid4())
+                
+                # Create DB record WITHOUT sending to Azure Queue
+                queue_state_id = QueueState.create(
+                    username=username,
+                    queue_name=queue_name,
+                    message=message_json,
+                    message_id=temp_message_id,
+                    pop_receipt=None,  # No pop receipt yet
+                    status=status,
+                    account_name=None,
+                    session_id=session_id
+                )
+                logger.info(f"✅ Created pending queue state record {queue_state_id} for file {file.filename} (status: {status})")
+                
                 return {
                     'message': f"File '{file.filename}' uploaded successfully",
                     'file_path': f"{username}/{file.filename}",
                     'filename': file.filename,
+                    'queue_name': queue_name,
+                    'queue_state_id': queue_state_id,
                     "code": 200
                 }
             except Exception as e:
