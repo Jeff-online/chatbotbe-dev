@@ -76,6 +76,7 @@ class FileDelete(BaseArgsParser):
         super().__init__()
         self.parser.add_argument('username', type=str, location='args', required=True)
         self.parser.add_argument('filename', type=str, location='args')
+        self.parser.add_argument('session_id', type=str, location='args')
 
 
 class CheckTokenParser(BaseArgsParser):
@@ -89,12 +90,15 @@ class CheckTokenParser(BaseArgsParser):
 class TaskQueuePostParser(BaseArgsParser):
     def __init__(self):
         super().__init__()
-        self.parser.add_argument('username', type=str, required=True, help="ユーザー名")
+        self.parser.add_argument('username', type=self.check_username, required=True, help="ユーザー名")
         self.parser.add_argument('queue_name', type=str, help="キュー名")
         self.parser.add_argument('message', type=str, required=True, help="送信メッセージ")
-        self.parser.add_argument('account_name', type=str, help="アカウント名")
         self.parser.add_argument('attachment_names', type=str, action="append", help="添付ファイル名リスト")
         self.parser.add_argument('session_id', type=str, help="セッションID")
+
+    @staticmethod
+    def check_username(value):
+        return InfoAuth.validate_username(value)
 
 
 class TaskQueuePutParser(BaseArgsParser):

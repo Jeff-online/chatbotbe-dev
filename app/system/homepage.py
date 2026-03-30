@@ -142,9 +142,47 @@ class SessionManagement(GlobalResource):
                         history_data = session_info["S_info"]["content"]
 
                         try:
+                            # Before calling get_answer, update status to 'processing'
+                            if attachment_names:
+                                for filename in (attachment_names if isinstance(attachment_names, list) else [attachment_names]):
+                                    QueueState.update_status_by_filename(username, filename, "processing")
+                            
                             content = clue + content
                             content, response_ai, used_model = self.get_answer(file_content, content, dialogue_history, history_data, deploy_model)
+                            
+                            # After AI finishes, update status to 'parsed'
+                            if attachment_names:
+                                for filename in (attachment_names if isinstance(attachment_names, list) else [attachment_names]):
+                                    QueueState.update_status_by_filename(username, filename, "parsed")
+                                    
+                                    # ✅ NEW: Delete the message from Azure Queue after successful processing
+                                    try:
+                                        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status = 'parsed'"
+                                        params = [{"name": "@username", "value": username}]
+                                        items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+                                        
+                                        for item in items:
+                                            msg_data = item.get("message", {})
+                                            if isinstance(msg_data, str):
+                                                try: msg_data = json.loads(msg_data)
+                                                except: continue
+                                            
+                                            if filename in msg_data.get("attachment_names", []):
+                                                m_id = item.get("message_id")
+                                                p_receipt = item.get("pop_receipt")
+                                                q_name = item.get("queue_name")
+                                                
+                                                if m_id and p_receipt and q_name:
+                                                    queue_client = TaskQueue._get_queue_client(q_name)
+                                                    queue_client.delete_message(m_id, p_receipt)
+                                                    logger.info(f"✅ Successfully deleted processed message {m_id} from queue {q_name} for file {filename}")
+                                    except Exception as q_del_err:
+                                        logger.warning(f"⚠️ Failed to delete message from queue after parsing: {q_del_err}")
                         except Exception as e:
+                            # Update to 'failed' on error
+                            if attachment_names:
+                                for filename in (attachment_names if isinstance(attachment_names, list) else [attachment_names]):
+                                    QueueState.update_status_by_filename(username, filename, "failed")
                             return {"message": str(e), "status": 404}
 
                         history_data.append([content, response_ai])
@@ -352,35 +390,51 @@ class FileManagement(GlobalResource):
                 
                 queue_name = "heavy-queue" if total_tokens > TaskQueue.HEAVY_QUEUE_THRESHOLD else "light-queue"
                 
-                # 3. Create Cosmos DB record with status='uploaded' (NOT queued yet)
+                # 3. Create Cosmos DB record and SEND to Azure Queue IMMEDIATELY
                 create_time = datetime.now().isoformat()
-                status = "uploaded"  # New status: file uploaded but not yet queued for processing
+                status = "queued"  # Status: queued for processing
+                
                 message_payload = {
-                    "account_name": None,
                     "queue_name": queue_name,
                     "user-name": username,
                     "create_time": create_time,
                     "status": status,
-                    "message": f"File uploaded: {file.filename} (waiting for submit)",
-                    "attachment_names": attachment_names
+                    "message": f"File uploaded: {file.filename}",
+                    "attachment_names": attachment_names,
+                    "session_id": session_id
                 }
                 message_json = json.dumps(message_payload)
                 
-                # Generate a temporary ID (will be replaced when actually queued)
-                temp_message_id = str(uuid.uuid4())
+                # Truncate message content if it's too large (limit to 1K)
+                try:
+                    msg_data = json.loads(message_json)
+                    if 'message' in msg_data:
+                        msg_data['message'] = TaskQueue._truncate_message(msg_data['message'])
+                    final_message = json.dumps(msg_data)
+                except:
+                    final_message = message_json
                 
-                # Create DB record WITHOUT sending to Azure Queue
+                # Actually send to Azure Queue
+                queue_client = TaskQueue._get_queue_client(queue_name)
+                try:
+                    queue_client.create_queue()
+                except ResourceExistsError:
+                    pass
+                
+                send_result = queue_client.send_message(final_message)
+                logger.info(f"✅ Sent message to Azure Queue {queue_name}, message_id: {send_result.id}")
+                
+                # Create DB record with real message_id and pop_receipt
                 queue_state_id = QueueState.create(
                     username=username,
                     queue_name=queue_name,
                     message=message_json,
-                    message_id=temp_message_id,
-                    pop_receipt=None,  # No pop receipt yet
+                    message_id=send_result.id,
+                    pop_receipt=send_result.pop_receipt,
                     status=status,
-                    account_name=None,
                     session_id=session_id
                 )
-                logger.info(f"✅ Created pending queue state record {queue_state_id} for file {file.filename} (status: {status})")
+                logger.info(f"✅ Created queue state record {queue_state_id} for file {file.filename} (status: {status})")
                 
                 return {
                     'message': f"File '{file.filename}' uploaded successfully",
@@ -388,6 +442,7 @@ class FileManagement(GlobalResource):
                     'filename': file.filename,
                     'queue_name': queue_name,
                     'queue_state_id': queue_state_id,
+                    'message_id': send_result.id,
                     "code": 200
                 }
             except Exception as e:
@@ -431,21 +486,59 @@ class FileManagement(GlobalResource):
         args = args_parser.parser.parse_args()
         username = args.get("username")
         filename = args.get("filename")
+        session_id = args.get("session_id")
         if not username:
             raise messages.UserNameNotExistsError
         if filename:
             try:
-                # 1. Delete Blob
-                blob_client = current_app.container_client.get_blob_client(f"{username}/{filename}")
-                blob_client.delete_blob()
-                logger.info(f"user: {username}\n option: File '{filename}' deleted from blob successfully")
-                
-                # 2. Delete Queue Message and Cosmos Record
+                # 1. Delete Queue Message and Cosmos Record (Filtered by session_id if provided)
                 try:
-                    QueueState.delete_by_filename(username, filename)
-                    logger.info(f"✅ Deleted queue records and messages for user {username}, file {filename}")
+                    QueueState.delete_by_filename(username, filename, session_id)
+                    logger.info(f"✅ Deleted queue records and messages for user {username}, file {filename}, session {session_id}")
                 except Exception as q_err:
                     logger.error(f"❌ Failed to delete queue records for file {filename}: {q_err}")
+
+                # 2. Check if any other records exist for this user and filename before deleting Blob
+                # If multiple sessions use the same file, we shouldn't delete the blob yet
+                query = "SELECT VALUE count(1) FROM c WHERE c.type = 'queue_state' AND c.username = @username"
+                params = [{"name": "@username", "value": username}]
+                
+                # Check message content for the filename
+                # Note: Cosmos DB query for array contains might be complex here, 
+                # but we can fetch and check or use a simpler check if we know the structure.
+                # Since we just deleted the specific session's record, we check if ANY remains.
+                
+                remaining_items = list(current_app.container_task_queue.query_items(
+                    query=query, 
+                    parameters=params, 
+                    enable_cross_partition_query=True
+                ))
+                
+                # To be precise, we need to check if any record still has this filename in attachment_names
+                query_remaining = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username"
+                all_user_records = list(current_app.container_task_queue.query_items(
+                    query=query_remaining, 
+                    parameters=params, 
+                    enable_cross_partition_query=True
+                ))
+                
+                file_still_referenced = False
+                for rec in all_user_records:
+                    msg_data = rec.get("message", {})
+                    if isinstance(msg_data, str):
+                        try: msg_data = json.loads(msg_data)
+                        except: continue
+                    if filename in msg_data.get("attachment_names", []):
+                        file_still_referenced = True
+                        break
+                
+                if not file_still_referenced:
+                    # No more references, safe to delete Blob
+                    blob_client = current_app.container_client.get_blob_client(f"{username}/{filename}")
+                    blob_client.delete_blob()
+                    logger.info(f"user: {username}\n option: File '{filename}' deleted from blob (no more references)")
+                else:
+                    logger.info(f"Skipping Blob deletion for '{filename}' as it is still referenced in other sessions")
 
                 return {"msg": f"{filename}ファイルの削除が成功しました", "code": 200}
             except Exception as e:

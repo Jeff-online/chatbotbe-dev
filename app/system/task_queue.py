@@ -210,7 +210,7 @@ class QueueConcurrencyLock:
 class QueueState(GlobalResource):
 
     @staticmethod
-    def create(username: str, queue_name: str, message: str, message_id: str, status: str, account_name: str = None, session_id: str = None, pop_receipt: str = None) -> str:
+    def create(username: str, queue_name: str, message: str, message_id: str, status: str, session_id: str = None, pop_receipt: str = None) -> str:
         """
         创建队列状态记录
         """
@@ -227,7 +227,6 @@ class QueueState(GlobalResource):
                 "message_id": message_id,
                 "pop_receipt": pop_receipt,
                 "status": status,
-                "account_name": account_name,
                 "create_time": datetime.now().isoformat()
             }
             if session_id:
@@ -263,6 +262,36 @@ class QueueState(GlobalResource):
         logger.info(f"✅ Updated queue state to '{status}' for message_id: {message_id}")
 
     @staticmethod
+    def update_status_by_filename(username: str, filename: str, status: str) -> None:
+        """
+        根据用户名和文件名更新队列状态
+        :param username: 用户名
+        :param filename: 文件名
+        :param status: 新状态
+        """
+        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username"
+        params = [{"name": "@username", "value": username}]
+        
+        try:
+            items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+            for item in items:
+                message_data = item.get("message", {})
+                if isinstance(message_data, str):
+                    try:
+                        message_data = json.loads(message_data)
+                    except:
+                        continue
+                
+                attachments = message_data.get("attachment_names", [])
+                if filename in attachments:
+                    item["status"] = status
+                    item["update_time"] = datetime.now().isoformat()
+                    current_app.container_task_queue.upsert_item(item)
+                    logger.info(f"✅ Updated queue state to '{status}' for file: {filename}")
+        except Exception as e:
+            logger.error(f"❌ Failed to update status by filename: {e}")
+
+    @staticmethod
     def delete_by_message_id(message_id: str) -> None:
         query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.message_id = @message_id"
         params = [{"name": "@message_id", "value": message_id}]
@@ -273,17 +302,21 @@ class QueueState(GlobalResource):
                 current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
 
     @staticmethod
-    def delete_by_filename(username: str, filename: str) -> None:
-        """根据用户名和文件名删除所有状态的队列记录和消息"""
-        logger.info(f"🔵 Attempting to delete queue record and message for user: {username}, file: {filename}")
+    def delete_by_filename(username: str, filename: str, session_id: str = None) -> None:
+        """根据用户名、文件名（可选：session_id）删除队列记录和消息"""
+        logger.info(f"🔵 Attempting to delete queue record and message for user: {username}, file: {filename}, session_id: {session_id}")
         
-        # 查询所有状态的记录（包括 uploaded, queued, processing, parsed, failed）
+        # 查询记录
         query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username"
         params = [{"name": "@username", "value": username}]
         
+        if session_id:
+            query += " AND c.session_id = @session_id"
+            params.append({"name": "@session_id", "value": session_id})
+        
         try:
             items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
-            logger.info(f"🔍 Found {len(items)} records (all statuses) for user {username}")
+            logger.info(f"🔍 Found {len(items)} records for user {username}")
             
             deleted_count = 0
             for item in items:
@@ -543,18 +576,30 @@ class TaskQueue(GlobalResource):
             raise messages.InterfaceCallError("AZURE_STORAGE_CONNECTION_STRING not configured")
         return QueueClient.from_connection_string(connection_string, queue_name)
 
+    @staticmethod
+    def _truncate_message(message: str, limit: int = 1024) -> str:
+        """
+        Truncate message content if it exceeds the limit.
+        """
+        if message and len(message) > limit:
+            logger.warning(f"⚠️ Message truncated from {len(message)} to {limit} characters")
+            return message[:limit] + "..."
+        return message
+
     def post(self):
         args_parser = TaskQueuePostParser()
         args = args_parser.parser.parse_args()
         username = args.get("username")
         queue_name = args.get("queue_name")
         message_content = args.get("message")
-        account_name = args.get("account_name")
         attachment_names = args.get("attachment_names")
         session_id = args.get("session_id")
 
         if not username:
             raise messages.UserNameNotExistsError
+
+        # Truncate message content if it's too large (limit to 1K)
+        truncated_content = self._truncate_message(message_content)
 
         # Determine queue based on tokens if attachment_names provided
         if attachment_names:
@@ -572,12 +617,11 @@ class TaskQueue(GlobalResource):
 
         # Construct message payload
         message_payload = {
-            "account_name": account_name,
             "queue_name": queue_name,
             "user-name": username,
             "create_time": create_time,
             "status": status,
-            "message": message_content,
+            "message": truncated_content,
             "attachment_names": attachment_names if attachment_names else [],
             "session_id": session_id
         }
@@ -598,7 +642,6 @@ class TaskQueue(GlobalResource):
                 message_id=send_result.id,
                 pop_receipt=send_result.pop_receipt,
                 status=status,
-                account_name=account_name,
                 session_id=session_id
             )
             logger.info(f"✅ Created queue record {queue_state_id} for user {username}")
@@ -744,7 +787,7 @@ class TaskQueue(GlobalResource):
                     "queue_name": queue_name,
                     "status": "updated",
                     "create_time": datetime.now().isoformat(),
-                    "message": message_content
+                    "message": self._truncate_message(message_content)
                 }
                 message_json = json.dumps(message_payload)
 
@@ -962,7 +1005,17 @@ class SubmitQueuedTasks(GlobalResource):
                             except ResourceExistsError:
                                 pass
                             
-                            send_result = queue_client.send_message(item['message'])
+                            # Ensure message is not too large before sending
+                            # Since item['message'] is already JSON, we need to parse it, truncate the 'message' field, and re-serialize
+                            try:
+                                msg_data = json.loads(item['message'])
+                                if 'message' in msg_data:
+                                    msg_data['message'] = TaskQueue._truncate_message(msg_data['message'])
+                                final_message = json.dumps(msg_data)
+                            except:
+                                final_message = item['message']
+                                
+                            send_result = queue_client.send_message(final_message)
                             logger.info(f"✅ Sent to queue {queue_name}, message_id: {send_result.id}")
                             
                             # 更新 DB 记录，添加真实的 message_id 和 pop_receipt
