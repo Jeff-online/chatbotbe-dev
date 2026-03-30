@@ -323,9 +323,21 @@ class FileManagement(GlobalResource):
         args = args_parser.parser.parse_args()
         username = args.get("username")
         file = args.get("file")
-        session_id = args.get("session_id")
         if not username:
             raise messages.UserNameNotExistsError
+
+        # 直接从用户信息中获取最新的 session_id，不再由前端传递
+        user_data = list(current_app.container.query_items(
+            query=f"SELECT * FROM user u WHERE u.username = '{username}'",
+            enable_cross_partition_query=True
+        ))
+        if not user_data:
+            raise messages.UserNotExistsError
+            
+        user_info = user_data[0]
+        u_sessions = user_info.get("U_session", [])
+        session_id = u_sessions[-1].get("session_id") if u_sessions else None
+        
         if file and self.allowed_file(file.filename):
             try:
                 # 1. Upload to Blob Storage
@@ -350,8 +362,7 @@ class FileManagement(GlobalResource):
                     "create_time": create_time,
                     "status": status,
                     "message": f"File uploaded: {file.filename} (waiting for submit)",
-                    "attachment_names": attachment_names,
-                    "session_id": session_id
+                    "attachment_names": attachment_names
                 }
                 message_json = json.dumps(message_payload)
                 
@@ -535,6 +546,6 @@ class CheckToken(GlobalResource):
                 "code": 500
             }
 
-system_api.add_resource(SessionManagement, "/session_management")
+system_api.add_resource(SessionManagement, "/session_manionagement")
 system_api.add_resource(FileManagement, "/upload_file")
 system_api.add_resource(CheckToken, "/check_token")
