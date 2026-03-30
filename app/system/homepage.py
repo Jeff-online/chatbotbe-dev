@@ -546,6 +546,6 @@ class CheckToken(GlobalResource):
                 "code": 500
             }
 
-system_api.add_resource(SessionManagement, "/session_manionagement")
+system_api.add_resource(SessionManagement, "/session_management")
 system_api.add_resource(FileManagement, "/upload_file")
 system_api.add_resource(CheckToken, "/check_token")
