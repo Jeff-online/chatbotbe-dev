@@ -214,7 +214,7 @@ class QueueState(GlobalResource):
         """
         创建队列状态记录
         """
-        logger.info(f"🔵 QueueState.create started for user: {username}, message_id: {message_id}")
+        logger.info(f"🔵 QueueState.create started for user: {username}, message_id: {message_id}, queue: {queue_name}, status: {status}")
         
         try:
             doc_id = str(uuid.uuid4())
@@ -232,17 +232,19 @@ class QueueState(GlobalResource):
             if session_id:
                 item["session_id"] = session_id
             
+            logger.info(f"📝 Preparing to insert item into Cosmos DB: {doc_id}")
+            
             if not hasattr(current_app, 'container_task_queue') or current_app.container_task_queue is None:
                 logger.error("❌ current_app.container_task_queue is NOT initialized!")
                 raise Exception("Cosmos DB container not initialized in current_app")
             
-            # 直接尝试创建 item，不再进行冗余的 container.read() 检查
+            # 直接尝试创建 item
             result = current_app.container_task_queue.create_item(body=item)
             logger.info(f"✅ Queue state item created successfully in database, id: {result.get('id')}")
             return doc_id
             
         except Exception as e:
-            logger.error(f"❌ Error in QueueState.create: {e}", exc_info=True)
+            logger.error(f"❌ Error in QueueState.create: {str(e)}", exc_info=True)
             raise
 
     @staticmethod
