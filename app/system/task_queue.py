@@ -628,7 +628,7 @@ class QueueStats(GlobalResource):
 
 
 class TaskQueue(GlobalResource):
-    HEAVY_QUEUE_THRESHOLD = 50000
+    HEAVY_QUEUE_THRESHOLD = 30000
 
     @staticmethod
     def _get_queue_client(queue_name: str) -> QueueClient:

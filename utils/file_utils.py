@@ -284,6 +284,7 @@ MODEL_TOKEN_LIMIT = {
     "gpt-35-turbo": 16384,
     "gpt-3.5-turbo": 16384,
     "gpt-5.2": 600000,
+    "gpt-5.4mini": 600000,
 }
 
 # ========================
@@ -412,11 +413,12 @@ def _estimate_tokens_fast(blob_client, file_extension: str, encoding):
                     img_ratio_est = min(images_hint / max(pages_hint, 1), 1.0)
                 else:
                     img_ratio_est = 0.7 if file_size > 2 * 1024 * 1024 else 0.5
-                    avg_bytes_per_page = 200 * 1024 if img_ratio_est >= 0.6 else 40 * 1024
+                    # 进一步调低平均每页字节数估算，以防低估 Token (之前 60KB/10KB 依然可能低估复杂 PDF)
+                    avg_bytes_per_page = 20 * 1024 if img_ratio_est >= 0.6 else 5 * 1024
                     pages_est = max(1, int(file_size / avg_bytes_per_page))
 
-            text_tpp = 650
-            image_tpp = 220
+            text_tpp = 800  # 稍微提高每页 text 的 token 估值
+            image_tpp = 300 # 稍微提高每页 image 的 token 估值
             tokens_pages = int(pages_est * ((1 - img_ratio_est) * text_tpp + img_ratio_est * image_tpp))
 
             if file_size > 5 * 1024 * 1024 and img_ratio_est >= 0.6:

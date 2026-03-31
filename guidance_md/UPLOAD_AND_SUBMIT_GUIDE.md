@@ -34,7 +34,7 @@
 
 **功能**: 
 - 上传文件到 Azure Blob Storage
-- 计算 token 数量，决定使用哪个队列（heavy-queue 或 light-queue）
+- 计算 token 数量，决定使用哪个队列（Token > 30,000 则进入 heavy-queue，否则 light-queue）
 - 创建 Cosmos DB 记录，状态为 `uploaded`
 
 **请求参数**:
@@ -315,12 +315,12 @@ uploaded → queued → processing → parsed
 ### Heavy-queue
 - **最大并发数**: 1
 - **适用场景**: 大文件、复杂处理
-- **判定标准**: token 数量 > 50000
+- **判定标准**: token 数量 > 30000
 
 ### Light-queue
 - **最大并发数**: 2
 - **适用场景**: 小文件、简单处理
-- **判定标准**: token 数量 ≤ 50000
+- **判定标准**: token 数量 ≤ 30000
 
 ### 锁机制
 

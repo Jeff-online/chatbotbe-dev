@@ -112,8 +112,8 @@ GET /queue_stats?username=dev
 
 | 队列 | 最大并发 | 判定标准 |
 |------|----------|----------|
-| heavy-queue | 1 | tokens > 50000 |
-| light-queue | 2 | tokens ≤ 50000 |
+| heavy-queue | 1 | tokens > 30000 |
+| light-queue | 2-3 | tokens ≤ 30000 |
 
 ---
 

@@ -213,7 +213,7 @@ def call_openai_queued():
     
     # 计算 token 数以决定队列
     token_count = estimate_tokens(messages)
-    queue_name = "heavy-queue" if token_count > 50000 else "light-queue"
+    queue_name = "heavy-queue" if token_count > 30000 else "light-queue"
     message_id = str(uuid.uuid4())
     
     def openai_processor(username, attachment_names, message_data):
