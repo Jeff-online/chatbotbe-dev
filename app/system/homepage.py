@@ -11,6 +11,7 @@ from flask import current_app
 from datetime import datetime, timedelta
 from utils.file_utils import FileOperation, cal_tokens
 from .args_parser import CheckTokenParser
+from azure.core.exceptions import ResourceExistsError
 from werkzeug.utils import secure_filename
 from common.common_resource import GlobalResource, Resource
 import json
