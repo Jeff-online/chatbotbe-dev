@@ -496,38 +496,49 @@ class QueueStats(GlobalResource):
         args = args_parser.parser.parse_args()
         username = args.get("username")
         
-        # 1. 查询当前用户的详细待处理信息 (用于前端本地状态更新)
-        query_user_pending = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status IN ('queued', 'processing')"
+        # 1. 查询当前用户的待处理信息 (用于前端统计本地状态)
+        query_user_pending = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status NOT IN ('parsed', 'failed')"
         params_user = [{"name": "@username", "value": username}] if username else []
         
         items_user_pending = []
         if username:
-            items_user_pending = list(current_app.container_task_queue.query_items(
-                query=query_user_pending, 
-                parameters=params_user,
-                enable_cross_partition_query=True
-            ))
+            try:
+                items_user_pending = list(current_app.container_task_queue.query_items(
+                    query=query_user_pending, 
+                    parameters=params_user,
+                    enable_cross_partition_query=True
+                ))
+            except Exception as e:
+                logger.error(f"❌ Error querying user pending items: {e}")
         
         # 2. 查询指定用户的已解析完成任务
-        query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status = 'parsed'"
-        params_parsed = []
-        if username:
-            query_parsed += " AND c.username = @username"
-            params_parsed.append({"name": "@username", "value": username})
+        query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status = 'parsed'"
+        params_parsed = [{"name": "@username", "value": username}] if username else []
         
-        items_parsed = list(current_app.container_task_queue.query_items(
-            query=query_parsed,
-            parameters=params_parsed,
-            enable_cross_partition_query=True
-        ))
+        items_parsed = []
+        if username:
+            try:
+                items_parsed = list(current_app.container_task_queue.query_items(
+                    query=query_parsed,
+                    parameters=params_parsed,
+                    enable_cross_partition_query=True
+                ))
+            except Exception as e:
+                logger.error(f"❌ Error querying parsed items: {e}")
         
         # 3. 计算全局排队位置 (前面排队的附件总数)
-        # 按照用户建议的排序规则查询所有正在排队或处理的任务
-        query_all_queue = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status IN ('queued', 'processing') ORDER BY c._ts, c.session_id"
-        all_queue_items = list(current_app.container_task_queue.query_items(
-            query=query_all_queue, 
-            enable_cross_partition_query=True
-        ))
+        # 为了更健壮，我们查询所有非完成状态的任务，并在 Python 中手动排序，避免 Cosmos DB 索引限制
+        query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed')"
+        
+        all_active_items = []
+        try:
+            all_active_items = list(current_app.container_task_queue.query_items(
+                query=query_all_active, 
+                enable_cross_partition_query=True
+            ))
+            logger.info(f"🔍 Found {len(all_active_items)} total active queue items in database")
+        except Exception as e:
+            logger.error(f"❌ Error querying all active items: {e}")
         
         # 统计当前用户的待处理详情
         total_pending = 0
@@ -564,11 +575,14 @@ class QueueStats(GlobalResource):
             if attachment_names: parsed_attachment_names.extend(attachment_names)
         
         # 精确计算排队位置 (排在当前用户第一个活跃任务前的所有附件总数)
+        # 在 Python 中按照时间戳和 SessionID 排序，确保逻辑一致
+        sorted_all = sorted(all_active_items, key=lambda x: (x.get('_ts', 0), x.get('session_id', '')))
+        
         queue_position = 0
         if username:
             user_task_index = -1
-            # 在已排序的全局队列中找到当前用户的第一个任务
-            for i, task in enumerate(all_queue_items):
+            # 找到当前用户最早的一个任务
+            for i, task in enumerate(sorted_all):
                 if task.get("username") == username:
                     user_task_index = i
                     break
@@ -576,7 +590,7 @@ class QueueStats(GlobalResource):
             if user_task_index > 0:
                 # 累加排在前面的所有任务的附件数量
                 for i in range(user_task_index):
-                    ahead_task = all_queue_items[i]
+                    ahead_task = sorted_all[i]
                     msg_data = ahead_task.get("message", {})
                     if isinstance(msg_data, str):
                         try: msg_data = json.loads(msg_data)
@@ -585,16 +599,20 @@ class QueueStats(GlobalResource):
                     if isinstance(msg_data, dict):
                         ahead_attachments = msg_data.get("attachment_names", [])
                         queue_position += len(ahead_attachments)
+                logger.info(f"📊 Calculated queue_position for {username}: {queue_position} (ahead of index {user_task_index})")
             elif user_task_index == -1:
-                # 如果当前用户的任务还没进入 queued/processing 状态 (还在 uploaded 状态)
+                # 如果当前用户的任务还没进入 active 状态 (理论上不应该，因为我们包含所有非完成状态)
                 # 那么全局所有正在排队/处理的任务都算在前面
-                for task in all_queue_items:
+                for task in sorted_all:
                     msg_data = task.get("message", {})
                     if isinstance(msg_data, str):
                         try: msg_data = json.loads(msg_data)
                         except: pass
                     if isinstance(msg_data, dict):
                         queue_position += len(msg_data.get("attachment_names", []))
+                logger.info(f"📊 User {username} not found in active queue, total active attachments: {queue_position}")
+            else:
+                logger.info(f"📊 User {username} is at the front of the queue")
         
         return {
             "total_pending": total_pending,
