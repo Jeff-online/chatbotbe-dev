@@ -396,9 +396,9 @@ class FileManagement(GlobalResource):
                 
                 queue_name = "heavy-queue" if total_tokens > TaskQueue.HEAVY_QUEUE_THRESHOLD else "light-queue"
                 
-                # 3. Create Cosmos DB record and SEND to Azure Queue IMMEDIATELY
+                # 3. Create Cosmos DB record ONLY (status: uploaded)
                 create_time = datetime.now().isoformat()
-                status = "queued"
+                status = "uploaded"
                 
                 message_payload = {
                     "queue_name": queue_name,
@@ -411,35 +411,12 @@ class FileManagement(GlobalResource):
                 }
                 message_json = json.dumps(message_payload)
                 
-                # Truncate message content if it's too large (limit to 1K)
-                try:
-                    msg_data = json.loads(message_json)
-                    if 'message' in msg_data:
-                        msg_data['message'] = TaskQueue._truncate_message(msg_data['message'])
-                    final_message = json.dumps(msg_data)
-                except Exception as tr_err:
-                    logger.warning(f"⚠️ Truncation failed, using original message: {tr_err}")
-                    final_message = message_json
-                
-                # Actually send to Azure Queue
-                logger.info(f"🚀 Sending message to Azure Queue: {queue_name}")
-                queue_client = TaskQueue._get_queue_client(queue_name)
-                try:
-                    queue_client.create_queue()
-                except ResourceExistsError:
-                    pass
-                
-                send_result = queue_client.send_message(final_message)
-                logger.info(f"✅ Sent message to Azure Queue {queue_name}, message_id: {send_result.id}")
-                
-                # Create DB record with real message_id and pop_receipt
-                logger.info(f"📝 Creating database record for message_id: {send_result.id}")
+                # Create DB record ONLY
+                logger.info(f"📝 Creating database record for file: {file.filename}")
                 queue_state_id = QueueState.create(
                     username=username,
                     queue_name=queue_name,
                     message=message_json,
-                    message_id=send_result.id,
-                    pop_receipt=send_result.pop_receipt,
                     status=status,
                     session_id=session_id
                 )
@@ -451,7 +428,6 @@ class FileManagement(GlobalResource):
                     'filename': file.filename,
                     'queue_name': queue_name,
                     'queue_state_id': queue_state_id,
-                    'message_id': send_result.id,
                     "code": 200
                 }
             except Exception as e:

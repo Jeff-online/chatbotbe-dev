@@ -210,11 +210,11 @@ class QueueConcurrencyLock:
 class QueueState(GlobalResource):
 
     @staticmethod
-    def create(username: str, queue_name: str, message: str, message_id: str, status: str, session_id: str = None, pop_receipt: str = None) -> str:
+    def create(username: str, queue_name: str, message: str, status: str, session_id: str = None) -> str:
         """
         创建队列状态记录
         """
-        logger.info(f"🔵 QueueState.create started for user: {username}, message_id: {message_id}, queue: {queue_name}, status: {status}")
+        logger.info(f"🔵 QueueState.create started for user: {username}, queue: {queue_name}, status: {status}")
         
         try:
             doc_id = str(uuid.uuid4())
@@ -224,8 +224,6 @@ class QueueState(GlobalResource):
                 "username": username,
                 "queue_name": queue_name,
                 "message": message,
-                "message_id": message_id,
-                "pop_receipt": pop_receipt,
                 "status": status,
                 "create_time": datetime.now().isoformat()
             }
@@ -450,24 +448,16 @@ class QueueStats(GlobalResource):
         args = args_parser.parser.parse_args()
         username = args.get("username")
         
-        # 查询 queued 和 processing 状态（待处理）
-        query_pending = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status IN ('queued', 'processing')"
-        params = []
-        
-        if username:
-            query_pending += " AND c.username = @username"
-            params.append({"name": "@username", "value": username})
-        
-        items_pending = list(current_app.container_task_queue.query_items(
-            query=query_pending, 
-            parameters=params, 
+        # 1. 查询所有正在处理的任务（用于计算排队位置）
+        query_all_pending = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status IN ('queued', 'processing')"
+        all_pending_items = list(current_app.container_task_queue.query_items(
+            query=query_all_pending, 
             enable_cross_partition_query=True
         ))
         
-        # 查询 parsed 状态（已解析完成）
+        # 2. 查询指定用户的已解析完成任务
         query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status = 'parsed'"
         params_parsed = []
-        
         if username:
             query_parsed += " AND c.username = @username"
             params_parsed.append({"name": "@username", "value": username})
@@ -478,50 +468,42 @@ class QueueStats(GlobalResource):
             enable_cross_partition_query=True
         ))
         
-        # 统计待处理（包含详细信息用于计算排队位置）
+        # 统计待处理详情
         total_pending = 0
         light_queue_pending = 0
         heavy_queue_pending = 0
         light_attachment_names = []
         heavy_attachment_names = []
-        
-        # 新增：按 create_time 排序，用于计算排队位置
         pending_tasks = []
         
-        for item in items_pending:
+        for item in all_pending_items:
             q_name = item.get("queue_name", "")
+            item_username = item.get("username")
             message_data = item.get("message", {})
             
-            # Parse message JSON if it's a string
             if isinstance(message_data, str):
-                try:
-                    message_data = json.loads(message_data)
-                except:
-                    pass
+                try: message_data = json.loads(message_data)
+                except: pass
             
-            # Extract attachment names from message
             attachment_names = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
             session_id = message_data.get("session_id") or item.get("session_id")
             
-            total_pending += 1
-            if q_name == "light-queue":
-                light_queue_pending += 1
-                if attachment_names:
-                    light_attachment_names.extend(attachment_names)
-            elif q_name == "heavy-queue":
-                heavy_queue_pending += 1
-                if attachment_names:
-                    heavy_attachment_names.extend(attachment_names)
+            # 只有当任务属于当前用户时，才计入详细统计（用于前端展示哪些文件在排队）
+            if not username or item_username == username:
+                total_pending += 1
+                if q_name == "light-queue":
+                    light_queue_pending += 1
+                    if attachment_names: light_attachment_names.extend(attachment_names)
+                elif q_name == "heavy-queue":
+                    heavy_queue_pending += 1
+                    if attachment_names: heavy_attachment_names.extend(attachment_names)
             
-            # 记录任务信息（用于计算排队位置）
+            # 记录所有待处理任务信息（用于计算排队位置）
             pending_tasks.append({
                 "id": item.get("id"),
-                "queue_name": q_name,
-                "status": item.get("status"),
-                "attachment_names": attachment_names,
-                "session_id": session_id,
-                "create_time": item.get("create_time"),
-                "update_time": item.get("update_time")
+                "username": item_username,
+                "create_time": item.get("create_time", ""),
+                "status": item.get("status")
             })
         
         # 统计已解析
@@ -530,29 +512,28 @@ class QueueStats(GlobalResource):
         for item in items_parsed:
             message_data = item.get("message", {})
             if isinstance(message_data, str):
-                try:
-                    message_data = json.loads(message_data)
-                except:
-                    pass
+                try: message_data = json.loads(message_data)
+                except: pass
             attachment_names = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
-            if attachment_names:
-                parsed_attachment_names.extend(attachment_names)
+            if attachment_names: parsed_attachment_names.extend(attachment_names)
         
-        # 新增：计算排队位置（排在前面的任务数量）
+        # 3. 计算排队位置（前面有多少个其他用户的任务）
         # 按 create_time 排序所有待处理任务
         sorted_tasks = sorted(pending_tasks, key=lambda x: x.get('create_time', ''))
         
-        # 默认返回 0（表示没有任务排在前面）
         queue_position = 0
-        
-        # 如果有 pending_tasks，返回第一个任务的索引位置（即前面的任务数量）
-        # 注意：这里假设前端会传递 session_id 或 attachment_names 来识别自己的任务
-        # 为了简化，我们直接返回总任务数 - 1（假设最新的任务是当前用户的）
-        if len(sorted_tasks) > 0:
-            # 找到最新的任务（假设是当前用户上传的）
-            # 实际上应该通过 session_id 或 attachment_names 来匹配
-            # 但为了性能，这里简化处理：返回总任务数 - 1
-            queue_position = len(sorted_tasks) - 1
+        if username and len(sorted_tasks) > 0:
+            # 找到当前用户最早的一个任务在队列中的位置
+            user_first_task_index = -1
+            for i, task in enumerate(sorted_tasks):
+                if task.get("username") == username:
+                    user_first_task_index = i
+                    break
+            
+            if user_first_task_index > 0:
+                # 统计排在当前用户前面的、属于其他用户的任务数量
+                # 简单处理：直接返回索引值，即前面有多少个任务
+                queue_position = user_first_task_index
         
         return {
             "total_pending": total_pending,
@@ -562,8 +543,7 @@ class QueueStats(GlobalResource):
             "heavy_attachment_names": heavy_attachment_names,
             "total_parsed": total_parsed,
             "parsed_attachment_names": parsed_attachment_names,
-            "queue_position": queue_position,  # 新增：排在前面的任务数量
-            "pending_tasks": pending_tasks,  # 保留：详细任务列表（可选）
+            "queue_position": queue_position,
             "code": 200
         }
 
@@ -641,8 +621,6 @@ class TaskQueue(GlobalResource):
                 username=username,
                 queue_name=queue_name,
                 message=message_json,
-                message_id=send_result.id,
-                pop_receipt=send_result.pop_receipt,
                 status=status,
                 session_id=session_id
             )
@@ -1020,9 +998,7 @@ class SubmitQueuedTasks(GlobalResource):
                             send_result = queue_client.send_message(final_message)
                             logger.info(f"✅ Sent to queue {queue_name}, message_id: {send_result.id}")
                             
-                            # 更新 DB 记录，添加真实的 message_id 和 pop_receipt
-                            item['message_id'] = send_result.id
-                            item['pop_receipt'] = send_result.pop_receipt
+                            # 更新 DB 记录
                             item['status'] = 'queued'
                             current_app.container_task_queue.upsert_item(item)
                         
