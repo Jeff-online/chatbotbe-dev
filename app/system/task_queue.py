@@ -26,7 +26,9 @@ class QueueConcurrencyLock:
     HEAVY_LOCK_ID = "heavy_queue_lock"
     LIGHT_LOCK_ID = "light_queue_lock"
     MAX_HEAVY_TASKS = 1
-    MAX_LIGHT_TASKS = 2
+    # 动态并发：如果有 heavy 任务，light 最多 2 个；如果没有 heavy 任务，light 最多 3 个
+    MAX_LIGHT_WITH_HEAVY = 2
+    MAX_LIGHT_WITHOUT_HEAVY = 3
     RETRY_INTERVAL_SECONDS = 3
     PROCESSING_TIMEOUT_MINUTES = 10
     
@@ -52,118 +54,123 @@ class QueueConcurrencyLock:
             raise
     
     @staticmethod
+    def _get_active_slots(lock_container, lock_id, queue_name):
+        """获取并清理超时的活跃槽位"""
+        try:
+            lock_doc = lock_container.read_item(item=lock_id, partition_key=lock_id)
+            current_time = datetime.now(timezone.utc)
+            processing_slots = lock_doc.get('processing_slots', [])
+            
+            cleaned_slots = []
+            for slot in processing_slots:
+                locked_at_str = slot.get('locked_at')
+                if locked_at_str:
+                    try:
+                        locked_at_time = datetime.fromisoformat(locked_at_str.replace('Z', '+00:00'))
+                        timeout_threshold = current_time - timedelta(minutes=QueueConcurrencyLock.PROCESSING_TIMEOUT_MINUTES)
+                        if locked_at_time < timeout_threshold:
+                            logger.warning(f"⚠️ 检测到{queue_name}锁槽位超时，强制释放：{slot.get('message_id')}")
+                        else:
+                            cleaned_slots.append(slot)
+                    except:
+                        cleaned_slots.append(slot)
+                else:
+                    cleaned_slots.append(slot)
+            
+            if len(cleaned_slots) != len(processing_slots):
+                lock_doc['processing_slots'] = cleaned_slots
+                lock_container.replace_item(item=lock_id, body=lock_doc)
+            
+            return cleaned_slots, lock_doc
+        except CosmosHttpResponseError as e:
+            if e.status_code == 404:
+                return [], None
+            raise
+
+    @staticmethod
     def acquire_lock(queue_name: str, message_id: str, session_id: str = None) -> bool:
         """
         获取队列处理锁
-        :param queue_name: 队列名称 (heavy-queue 或 light-queue)
-        :param message_id: 消息 ID
-        :param session_id: 会话 ID
-        :return: 是否成功获取锁
         """
-        if queue_name == "heavy-queue":
-            lock_id = QueueConcurrencyLock.HEAVY_LOCK_ID
-            max_tasks = QueueConcurrencyLock.MAX_HEAVY_TASKS
-        elif queue_name == "light-queue":
-            lock_id = QueueConcurrencyLock.LIGHT_LOCK_ID
-            max_tasks = QueueConcurrencyLock.MAX_LIGHT_TASKS
-        else:
-            logger.error(f"❌ Unknown queue name: {queue_name}")
-            return False
-        
         lock_container = QueueConcurrencyLock.get_lock_container()
-        lock_acquired = False
         
-        # 循环尝试获取锁
-        while not lock_acquired:
+        while True:
             try:
-                # 读取锁文档
-                lock_doc = lock_container.read_item(item=lock_id, partition_key=lock_id)
-                
-                # 检查是否有超时锁需要释放
-                current_time = datetime.now(timezone.utc)
-                processing_slots = lock_doc.get('processing_slots', [])
-                
-                # 清理超时的槽位
-                cleaned_slots = []
-                for slot in processing_slots:
-                    locked_at_str = slot.get('locked_at')
-                    if locked_at_str:
+                # 1. 检查是否有 Heavy 任务在运行
+                heavy_slots, heavy_doc = QueueConcurrencyLock._get_active_slots(
+                    lock_container, QueueConcurrencyLock.HEAVY_LOCK_ID, "heavy-queue"
+                )
+                is_heavy_running = len(heavy_slots) > 0
+
+                if queue_name == "heavy-queue":
+                    if not is_heavy_running:
+                        # 尝试获取 Heavy 锁
+                        if heavy_doc is None:
+                            heavy_doc = {
+                                "id": QueueConcurrencyLock.HEAVY_LOCK_ID,
+                                "processing_slots": [],
+                                "created_at": datetime.now(timezone.utc).isoformat()
+                            }
+                        
+                        heavy_doc['processing_slots'].append({
+                            'message_id': message_id,
+                            'session_id': session_id,
+                            'locked_at': datetime.now(timezone.utc).isoformat()
+                        })
+                        
                         try:
-                            locked_at_time = datetime.fromisoformat(locked_at_str.replace('Z', '+00:00'))
-                            timeout_threshold = current_time - timedelta(minutes=QueueConcurrencyLock.PROCESSING_TIMEOUT_MINUTES)
-                            
-                            if locked_at_time < timeout_threshold:
-                                logger.warning(f"⚠️ 检测到{queue_name}锁槽位超时，强制释放：{slot.get('message_id')}")
+                            if heavy_doc.get('_etag'):
+                                lock_container.replace_item(item=heavy_doc['id'], body=heavy_doc)
                             else:
-                                cleaned_slots.append(slot)
-                        except Exception as parse_err:
-                            logger.error(f"❌ 时间解析失败：{parse_err}")
-                            cleaned_slots.append(slot)
-                    else:
-                        cleaned_slots.append(slot)
-                
-                lock_doc['processing_slots'] = cleaned_slots
-                
-                # 检查是否有可用槽位
-                active_count = len(cleaned_slots)
-                
-                if active_count < max_tasks:
-                    # 有空闲槽位，尝试占用
-                    new_slot = {
-                        'message_id': message_id,
-                        'session_id': session_id,
-                        'locked_at': current_time.isoformat(),
-                        'occupied_by': os.environ.get("ACCOUNT_URL", "unknown")
-                    }
-                    lock_doc['processing_slots'].append(new_slot)
-                    
-                    try:
-                        lock_container.replace_item(item=lock_doc, body=lock_doc)
-                        logger.info(f"✅ 成功获取{queue_name}锁槽位，当前活跃数：{len(lock_doc['processing_slots'])}/{max_tasks}")
-                        lock_acquired = True
-                        return True
-                    except CosmosHttpResponseError as e:
-                        if e.status_code == 412:
-                            logger.warning(f"⚠️ 获取{queue_name}锁时发生并发冲突，将在 {QueueConcurrencyLock.RETRY_INTERVAL_SECONDS} 秒后重试...")
-                            time.sleep(QueueConcurrencyLock.RETRY_INTERVAL_SECONDS + random.uniform(0, 0.5))
-                            continue
-                        else:
+                                lock_container.create_item(body=heavy_doc)
+                            logger.info(f"✅ 成功获取 heavy-queue 锁")
+                            return True
+                        except CosmosHttpResponseError as e:
+                            if e.status_code == 412: continue
                             raise
-                else:
-                    # 没有空闲槽位，需要排队等待
-                    logger.info(f"⏳ {queue_name}已达最大并发数 ({active_count}/{max_tasks})，任务 {message_id} 进入等待...")
-                    time.sleep(QueueConcurrencyLock.RETRY_INTERVAL_SECONDS)
+                    else:
+                        logger.info(f"⏳ heavy-queue 已有任务在运行，任务 {message_id} 等待中...")
+                
+                elif queue_name == "light-queue":
+                    # 2. 确定 Light 任务的并发上限
+                    max_light = QueueConcurrencyLock.MAX_LIGHT_WITH_HEAVY if is_heavy_running else QueueConcurrencyLock.MAX_LIGHT_WITHOUT_HEAVY
                     
-            except CosmosHttpResponseError as e:
-                if e.status_code == 404:
-                    # 锁文档不存在，创建初始文档
-                    logger.info(f"🔵 锁文档 {lock_id} 不存在，正在初始化...")
-                    new_lock_doc = {
-                        "id": lock_id,
-                        "queue_type": queue_name,
-                        "max_concurrent_tasks": max_tasks,
-                        "processing_slots": [],
-                        "created_at": datetime.now(timezone.utc).isoformat()
-                    }
-                    try:
-                        lock_container.create_item(body=new_lock_doc)
-                        continue
-                    except Exception as create_error:
-                        logger.error(f"❌ 初始化锁文档失败：{create_error}")
-                        raise
-                elif e.status_code == 412:
-                    logger.warning(f"⚠️ 读取锁时发生并发冲突，立即重试...")
-                    time.sleep(random.uniform(0.1, 0.5))
-                    continue
-                else:
-                    logger.error(f"❌ 数据库操作失败，状态码：{e.status_code}")
-                    raise
-            except Exception as e:
-                logger.error(f"❌ 获取锁时发生未知错误：{e}")
+                    light_slots, light_doc = QueueConcurrencyLock._get_active_slots(
+                        lock_container, QueueConcurrencyLock.LIGHT_LOCK_ID, "light-queue"
+                    )
+                    
+                    if len(light_slots) < max_light:
+                        if light_doc is None:
+                            light_doc = {
+                                "id": QueueConcurrencyLock.LIGHT_LOCK_ID,
+                                "processing_slots": [],
+                                "created_at": datetime.now(timezone.utc).isoformat()
+                            }
+                        
+                        light_doc['processing_slots'].append({
+                            'message_id': message_id,
+                            'session_id': session_id,
+                            'locked_at': datetime.now(timezone.utc).isoformat()
+                        })
+                        
+                        try:
+                            if light_doc.get('_etag'):
+                                lock_container.replace_item(item=light_doc['id'], body=light_doc)
+                            else:
+                                lock_container.create_item(body=light_doc)
+                            logger.info(f"✅ 成功获取 light-queue 锁 (当前活跃: {len(light_doc['processing_slots'])}/{max_light}, Heavy状态: {'运行中' if is_heavy_running else '未运行'})")
+                            return True
+                        except CosmosHttpResponseError as e:
+                            if e.status_code == 412: continue
+                            raise
+                    else:
+                        logger.info(f"⏳ light-queue 已达上限 ({len(light_slots)}/{max_light})，任务 {message_id} 等待中...")
+
                 time.sleep(QueueConcurrencyLock.RETRY_INTERVAL_SECONDS)
-                continue
-        
-        return lock_acquired
+                
+            except Exception as e:
+                logger.error(f"❌ 获取锁时发生错误：{e}")
+                time.sleep(QueueConcurrencyLock.RETRY_INTERVAL_SECONDS)
     
     @staticmethod
     def release_lock(queue_name: str, message_id: str) -> bool:
@@ -489,10 +496,16 @@ class QueueStats(GlobalResource):
         args = args_parser.parser.parse_args()
         username = args.get("username")
         
-        # 1. 查询所有正在处理的任务（用于计算排队位置）
-        query_all_pending = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status IN ('queued', 'processing')"
-        all_pending_items = list(current_app.container_task_queue.query_items(
-            query=query_all_pending, 
+        # 1. 查询当前用户的待处理任务（queued, processing）
+        query_pending = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status IN ('queued', 'processing')"
+        params_pending = []
+        if username:
+            query_pending += " AND c.username = @username"
+            params_pending.append({"name": "@username", "value": username})
+        
+        items_pending = list(current_app.container_task_queue.query_items(
+            query=query_pending, 
+            parameters=params_pending,
             enable_cross_partition_query=True
         ))
         
@@ -509,43 +522,36 @@ class QueueStats(GlobalResource):
             enable_cross_partition_query=True
         ))
         
+        # 3. 计算排队位置（前面有多少个其他用户的任务）
+        # 查询所有人的排队任务来计算位置
+        query_all_queue = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status IN ('queued', 'processing')"
+        all_queue_items = list(current_app.container_task_queue.query_items(
+            query=query_all_queue, 
+            enable_cross_partition_query=True
+        ))
+        
         # 统计待处理详情
         total_pending = 0
         light_queue_pending = 0
         heavy_queue_pending = 0
         light_attachment_names = []
         heavy_attachment_names = []
-        pending_tasks = []
         
-        for item in all_pending_items:
+        for item in items_pending:
             q_name = item.get("queue_name", "")
-            item_username = item.get("username")
             message_data = item.get("message", {})
-            
             if isinstance(message_data, str):
                 try: message_data = json.loads(message_data)
                 except: pass
-            
             attachment_names = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
-            session_id = message_data.get("session_id") or item.get("session_id")
             
-            # 只有当任务属于当前用户时，才计入详细统计（用于前端展示哪些文件在排队）
-            if not username or item_username == username:
-                total_pending += 1
-                if q_name == "light-queue":
-                    light_queue_pending += 1
-                    if attachment_names: light_attachment_names.extend(attachment_names)
-                elif q_name == "heavy-queue":
-                    heavy_queue_pending += 1
-                    if attachment_names: heavy_attachment_names.extend(attachment_names)
-            
-            # 记录所有待处理任务信息（用于计算排队位置）
-            pending_tasks.append({
-                "id": item.get("id"),
-                "username": item_username,
-                "create_time": item.get("create_time", ""),
-                "status": item.get("status")
-            })
+            total_pending += 1
+            if q_name == "light-queue":
+                light_queue_pending += 1
+                if attachment_names: light_attachment_names.extend(attachment_names)
+            elif q_name == "heavy-queue":
+                heavy_queue_pending += 1
+                if attachment_names: heavy_attachment_names.extend(attachment_names)
         
         # 统计已解析
         total_parsed = len(items_parsed)
@@ -558,23 +564,28 @@ class QueueStats(GlobalResource):
             attachment_names = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
             if attachment_names: parsed_attachment_names.extend(attachment_names)
         
-        # 3. 计算排队位置（前面有多少个其他用户的任务）
-        # 按 create_time 排序所有待处理任务
-        sorted_tasks = sorted(pending_tasks, key=lambda x: x.get('create_time', ''))
-        
+        # 计算排队位置 (前面排队的附件总数)
+        sorted_all = sorted(all_queue_items, key=lambda x: x.get('create_time', ''))
         queue_position = 0
-        if username and len(sorted_tasks) > 0:
-            # 找到当前用户最早的一个任务在队列中的位置
-            user_first_task_index = -1
-            for i, task in enumerate(sorted_tasks):
+        if username:
+            user_task_index = -1
+            for i, task in enumerate(sorted_all):
                 if task.get("username") == username:
-                    user_first_task_index = i
+                    user_task_index = i
                     break
             
-            if user_first_task_index > 0:
-                # 统计排在当前用户前面的、属于其他用户的任务数量
-                # 简单处理：直接返回索引值，即前面有多少个任务
-                queue_position = user_first_task_index
+            if user_task_index > 0:
+                # 统计排在当前用户任务前面的所有附件总数
+                for i in range(user_task_index):
+                    ahead_task = sorted_all[i]
+                    msg_data = ahead_task.get("message", {})
+                    if isinstance(msg_data, str):
+                        try: msg_data = json.loads(msg_data)
+                        except: pass
+                    
+                    if isinstance(msg_data, dict):
+                        ahead_attachments = msg_data.get("attachment_names", [])
+                        queue_position += len(ahead_attachments)
         
         return {
             "total_pending": total_pending,
