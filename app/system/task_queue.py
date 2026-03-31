@@ -246,6 +246,47 @@ class QueueState(GlobalResource):
             raise
 
     @staticmethod
+    def update_status_by_id(doc_id: str, status: str) -> None:
+        """
+        根据记录 ID 直接更新队列状态
+        """
+        try:
+            item = current_app.container_task_queue.read_item(item=doc_id, partition_key=doc_id)
+            item["status"] = status
+            item["update_time"] = datetime.now().isoformat()
+            current_app.container_task_queue.upsert_item(item)
+            logger.info(f"✅ Updated queue state to '{status}' for record id: {doc_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to update status by id {doc_id}: {e}")
+
+    @staticmethod
+    def get_record_by_filename(username: str, filename: str, session_id: str = None):
+        """
+        根据文件名和会话 ID 获取队列状态记录
+        """
+        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username"
+        params = [{"name": "@username", "value": username}]
+        if session_id:
+            query += " AND c.session_id = @session_id"
+            params.append({"name": "@session_id", "value": session_id})
+        
+        try:
+            items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+            for item in items:
+                message_data = item.get("message", {})
+                if isinstance(message_data, str):
+                    try: message_data = json.loads(message_data)
+                    except: continue
+                
+                attachments = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
+                if filename in attachments:
+                    return item
+            return None
+        except Exception as e:
+            logger.error(f"❌ Error getting record by filename: {e}")
+            return None
+
+    @staticmethod
     def update_status_by_message_id(message_id: str, status: str) -> None:
         """
         根据 message_id 更新队列状态

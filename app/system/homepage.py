@@ -15,7 +15,7 @@ from azure.core.exceptions import ResourceExistsError
 from werkzeug.utils import secure_filename
 from common.common_resource import GlobalResource, Resource
 import json
-from .task_queue import TaskQueue, QueueState
+from .task_queue import TaskQueue, QueueState, QueueConcurrencyLock
 logger = logging.getLogger(__name__)
 
 
@@ -142,48 +142,59 @@ class SessionManagement(GlobalResource):
                         session_info = session_data[0]
                         history_data = session_info["S_info"]["content"]
 
+                        acquired_locks = []
                         try:
-                            # Before calling get_answer, update status to 'processing'
+                            # 1. Acquire locks for each attachment to control concurrency
                             if attachment_names:
-                                for filename in (attachment_names if isinstance(attachment_names, list) else [attachment_names]):
-                                    QueueState.update_status_by_filename(username, filename, "processing")
-                            
+                                norm_attachments = attachment_names if isinstance(attachment_names, list) else [attachment_names]
+                                for filename in norm_attachments:
+                                    # Find the record to get its ID and queue_name
+                                    record = QueueState.get_record_by_filename(username, filename, session_id)
+                                    if record:
+                                        doc_id = record.get("id")
+                                        q_name = record.get("queue_name", "light-queue")
+                                        
+                                        logger.info(f"🔵 Attempting to acquire lock for file: {filename} (id: {doc_id})")
+                                        # This will block until a slot is available
+                                        QueueConcurrencyLock.acquire_lock(q_name, doc_id, session_id=session_id)
+                                        
+                                        # Update status to 'processing' ONLY AFTER lock is acquired
+                                        QueueState.update_status_by_id(doc_id, "processing")
+                                        acquired_locks.append({"doc_id": doc_id, "queue_name": q_name, "filename": filename})
+                                    else:
+                                        logger.warning(f"⚠️ No queue_state record found for file: {filename}")
+
+                            # 2. Call AI to get answer
                             content = clue + content
                             content, response_ai, used_model = self.get_answer(file_content, content, dialogue_history, history_data, deploy_model)
                             
-                            # After AI finishes, update status to 'parsed'
-                            if attachment_names:
-                                for filename in (attachment_names if isinstance(attachment_names, list) else [attachment_names]):
-                                    QueueState.update_status_by_filename(username, filename, "parsed")
-                                    
-                                    # ✅ NEW: Delete the message from Azure Queue after successful processing
-                                    try:
-                                        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status = 'parsed'"
-                                        params = [{"name": "@username", "value": username}]
-                                        items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
-                                        
-                                        for item in items:
-                                            msg_data = item.get("message", {})
-                                            if isinstance(msg_data, str):
-                                                try: msg_data = json.loads(msg_data)
-                                                except: continue
-                                            
-                                            if filename in msg_data.get("attachment_names", []):
-                                                m_id = item.get("message_id")
-                                                p_receipt = item.get("pop_receipt")
-                                                q_name = item.get("queue_name")
-                                                
-                                                if m_id and p_receipt and q_name:
-                                                    queue_client = TaskQueue._get_queue_client(q_name)
-                                                    queue_client.delete_message(m_id, p_receipt)
-                                                    logger.info(f"✅ Successfully deleted processed message {m_id} from queue {q_name} for file {filename}")
-                                    except Exception as q_del_err:
-                                        logger.warning(f"⚠️ Failed to delete message from queue after parsing: {q_del_err}")
+                            # 3. Success: Update status to 'parsed' and release locks
+                            for lock_info in acquired_locks:
+                                doc_id = lock_info["doc_id"]
+                                q_name = lock_info["queue_name"]
+                                filename = lock_info["filename"]
+                                
+                                QueueState.update_status_by_id(doc_id, "parsed")
+                                
+                                # Release lock
+                                try:
+                                    QueueConcurrencyLock.release_lock(q_name, doc_id)
+                                    logger.info(f"✅ Released lock for processed file: {filename}")
+                                except Exception as rel_err:
+                                    logger.error(f"❌ Failed to release lock for {filename}: {rel_err}")
+
                         except Exception as e:
-                            # Update to 'failed' on error
-                            if attachment_names:
-                                for filename in (attachment_names if isinstance(attachment_names, list) else [attachment_names]):
-                                    QueueState.update_status_by_filename(username, filename, "failed")
+                            # Failure: Release all acquired locks and update status to 'failed'
+                            logger.error(f"❌ Error during AI processing: {str(e)}", exc_info=True)
+                            for lock_info in acquired_locks:
+                                doc_id = lock_info["doc_id"]
+                                q_name = lock_info["queue_name"]
+                                
+                                QueueState.update_status_by_id(doc_id, "failed")
+                                try:
+                                    QueueConcurrencyLock.release_lock(q_name, doc_id)
+                                except: pass
+                            
                             return {"message": str(e), "status": 404}
 
                         history_data.append([content, response_ai])
