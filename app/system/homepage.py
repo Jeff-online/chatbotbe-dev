@@ -365,34 +365,39 @@ class FileManagement(GlobalResource):
             raise messages.UserNameNotExistsError
 
         # 直接从用户信息中获取最新的 session_id，不再由前端传递
+        logger.info(f"🔍 Fetching user info for username: {username} to get latest session_id")
         user_data = list(current_app.container.query_items(
-            query=f"SELECT * FROM user u WHERE u.username = '{username}'",
+            query=f"SELECT * FROM c WHERE c.username = @username",
+            parameters=[{"name": "@username", "value": username}],
             enable_cross_partition_query=True
         ))
         if not user_data:
+            logger.error(f"❌ User '{username}' not found in database")
             raise messages.UserNotExistsError
             
         user_info = user_data[0]
         u_sessions = user_info.get("U_session", [])
         session_id = u_sessions[-1].get("session_id") if u_sessions else None
+        logger.info(f"✅ Found session_id: {session_id} for user: {username}")
         
         if file and self.allowed_file(file.filename):
             try:
                 # 1. Upload to Blob Storage
                 blob_client = current_app.container_client.get_blob_client(f"{username}/{file.filename}")
                 blob_client.upload_blob(file.stream, overwrite=True)
-                logger.info(f"File '{file.filename}' uploaded successfully to Azure Blob Storage")
+                logger.info(f"✅ File '{file.filename}' uploaded successfully to Azure Blob Storage")
 
-                # 2. Determine Queue (Light vs Heavy) - ONLY PREPARE, DON'T SEND YET
+                # 2. Determine Queue (Light vs Heavy)
                 attachment_names = [file.filename]
                 token_result = cal_tokens(username, attachment_names)
                 total_tokens = token_result.get("total_tokens", 0)
+                logger.info(f"📊 Token estimation for {file.filename}: {total_tokens}")
                 
                 queue_name = "heavy-queue" if total_tokens > TaskQueue.HEAVY_QUEUE_THRESHOLD else "light-queue"
                 
                 # 3. Create Cosmos DB record and SEND to Azure Queue IMMEDIATELY
                 create_time = datetime.now().isoformat()
-                status = "queued"  # Status: queued for processing
+                status = "queued"
                 
                 message_payload = {
                     "queue_name": queue_name,
@@ -411,10 +416,12 @@ class FileManagement(GlobalResource):
                     if 'message' in msg_data:
                         msg_data['message'] = TaskQueue._truncate_message(msg_data['message'])
                     final_message = json.dumps(msg_data)
-                except:
+                except Exception as tr_err:
+                    logger.warning(f"⚠️ Truncation failed, using original message: {tr_err}")
                     final_message = message_json
                 
                 # Actually send to Azure Queue
+                logger.info(f"🚀 Sending message to Azure Queue: {queue_name}")
                 queue_client = TaskQueue._get_queue_client(queue_name)
                 try:
                     queue_client.create_queue()
@@ -425,6 +432,7 @@ class FileManagement(GlobalResource):
                 logger.info(f"✅ Sent message to Azure Queue {queue_name}, message_id: {send_result.id}")
                 
                 # Create DB record with real message_id and pop_receipt
+                logger.info(f"📝 Creating database record for message_id: {send_result.id}")
                 queue_state_id = QueueState.create(
                     username=username,
                     queue_name=queue_name,
@@ -434,7 +442,7 @@ class FileManagement(GlobalResource):
                     status=status,
                     session_id=session_id
                 )
-                logger.info(f"✅ Created queue state record {queue_state_id} for file {file.filename} (status: {status})")
+                logger.info(f"✅ Successfully created database record: {queue_state_id}")
                 
                 return {
                     'message': f"File '{file.filename}' uploaded successfully",
@@ -446,7 +454,8 @@ class FileManagement(GlobalResource):
                     "code": 200
                 }
             except Exception as e:
-                logger.error(f"❌ Azure upload failed: {str(e)}")
+                logger.error(f"❌ Error during file upload processing: {str(e)}", exc_info=True)
+                return {'msg': f"Azure upload failed: {str(e)}", "code": 417}
                 return {'msg': f"Azure upload failed: {str(e)}", "code": 417}
 
         return {'msg': 'Invalid file type', "code": 400}
