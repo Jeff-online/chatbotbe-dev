@@ -65,7 +65,7 @@ pip install azure-identity
 ```python
 from azure.identity import DefaultAzureCredential
 from azure.cosmos import CosmosClient
-from azure.storage.blob import BlobServiceClient
+from azure.storage.queue import QueueClient
 
 # 使用托管身份或 CLI 登录
 credential = DefaultAzureCredential()
@@ -73,8 +73,8 @@ credential = DefaultAzureCredential()
 # Cosmos DB
 client = CosmosClient(cosmos_uri, credential=credential)
 
-# Blob Storage（用于存储用户上传的文件）
-blob_service_client = BlobServiceClient(account_url, credential=credential)
+# Storage（需要配置连接字符串或使用 SAS）
+queue_client = QueueClient(account_url, credential=credential)
 ```
 
 ---

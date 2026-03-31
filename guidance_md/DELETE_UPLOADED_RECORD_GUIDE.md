@@ -278,7 +278,11 @@ DELETE /upload_file?username=dev&filename=test.pdf
 ```python
 for item in items:
     if filename in attachments:
-        # 直接从 Cosmos DB 删除记录（所有状态）
+        # 1. 如果是 queued 状态，从 Azure Queue 删除消息
+        if status == 'queued' and message_id and pop_receipt:
+            queue_client.delete_message(message_id, pop_receipt)
+        
+        # 2. 从 Cosmos DB 删除记录（所有状态）
         current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
 ```
 

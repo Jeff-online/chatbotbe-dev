@@ -15,16 +15,18 @@
 
 **修改内容**:
 - 文件上传时只创建 Cosmos DB 记录，状态设为 `uploaded`
+- 不发送到 Azure Queue
 - 返回 `queue_name` 和 `queue_state_id` 给前端
 
 **关键变更**:
 ```python
 # 原来：直接发送到队列
 status = "queued"
-send_to_queue()
+send_to_azure_queue()
 
 # 现在：仅创建记录，等待提交
 status = "uploaded"  # 新状态
+# 不发送到 Azure Queue
 ```
 
 #### (2) 新增提交接口 (`app/system/task_queue.py`)
@@ -36,7 +38,8 @@ status = "uploaded"  # 新状态
 **功能**:
 - 查找所有 `status='uploaded'` 的记录
 - 更新状态为 `queued`
-- 更新消息内容（移除 'waiting for submit' 标记）
+- 发送到 Azure Queue
+- 更新真实的 `message_id` 和 `pop_receipt`
 
 **请求参数**:
 ```json
@@ -169,12 +172,13 @@ uploaded → queued → processing → parsed
 后端：
   1. 查找 uploaded 状态记录
   2. 更新 status='queued'
-  3. 更新 message 内容
+  3. 发送到 Azure Queue
+  4. 更新 message_id 和 pop_receipt
     ↓
 前端开始轮询队列状态
     ↓
 后台处理器：
-  1. 查询 queued 状态记录
+  1. 从队列获取消息
   2. 调用 /process_task_with_lock
   3. 获取并发锁
   4. 执行业务逻辑

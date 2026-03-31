@@ -47,7 +47,11 @@ query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username
 ```python
 for item in items:
     if filename in attachments:
-        # 直接删除 Cosmos DB 记录（所有状态）
+        # 只对 queued 状态清理 Azure Queue
+        if status == 'queued' and message_id and pop_receipt:
+            queue_client.delete_message(message_id, pop_receipt)
+        
+        # 对所有状态都删除 Cosmos DB 记录
         current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
 ```
 
@@ -295,15 +299,15 @@ methods: {
 返回结果
 ```
 
-### 状态处理
+### 状态机处理
 
 ```python
-# 所有状态都只从 Cosmos DB 删除
 if status == 'queued':
-    # 从 Cosmos DB 删除
+    # 清理 Azure Queue + Cosmos DB
+    delete_from_queue()
     delete_from_cosmos()
 elif status == 'uploaded':
-    # 从 Cosmos DB 删除
+    # 只清理 Cosmos DB
     delete_from_cosmos()
 elif status == 'processing':
     # 等待处理完成后再清理
