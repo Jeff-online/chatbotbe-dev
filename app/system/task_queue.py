@@ -577,18 +577,24 @@ class QueueStats(GlobalResource):
         # 计算排队位置：统计所有其他用户的附件总数（不包括当前用户）
         queue_position = 0
         if username:
+            logger.info(f"🔍 [DEBUG] 开始计算 {username} 的排队位置，总共查询到 {len(all_active_items)} 条活跃记录")
             for task in all_active_items:
                 task_username = task.get("username", "")
+                msg_data = task.get("message", {})
+                if isinstance(msg_data, str):
+                    try: msg_data = json.loads(msg_data)
+                    except: pass
+                
+                attachments = []
+                if isinstance(msg_data, dict):
+                    attachments = msg_data.get("attachment_names", [])
+                
                 # 只统计其他用户的任务，跳过当前用户的任务
                 if task_username != username:
-                    msg_data = task.get("message", {})
-                    if isinstance(msg_data, str):
-                        try: msg_data = json.loads(msg_data)
-                        except: pass
-                    
-                    if isinstance(msg_data, dict):
-                        ahead_attachments = msg_data.get("attachment_names", [])
-                        queue_position += len(ahead_attachments)
+                    logger.info(f"   ✅ 计入排队：user={task_username}, attachments={len(attachments)}, files={attachments}")
+                    queue_position += len(attachments)
+                else:
+                    logger.info(f"   ⏭️  跳过当前用户：user={task_username}, attachments={len(attachments)}")
             
             logger.info(f"📊 Calculated queue_position for {username}: {queue_position} (total attachments from other users)")
         
@@ -606,7 +612,7 @@ class QueueStats(GlobalResource):
 
 
 class TaskQueue(GlobalResource):
-    HEAVY_QUEUE_THRESHOLD = 40000
+    HEAVY_QUEUE_THRESHOLD = 30000
 
     @staticmethod
     def _get_queue_client(queue_name: str) -> QueueClient:
