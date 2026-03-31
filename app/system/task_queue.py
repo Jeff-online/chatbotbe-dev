@@ -7,11 +7,9 @@ import random
 from datetime import datetime, timedelta, timezone
 from app import messages
 from . import system_api
-from .args_parser import TaskQueuePostParser, TaskQueueDeleteParser, QueueStateGetParser, QueueStatePostParser, TaskQueueGetParser, TaskQueuePutParser
+from .args_parser import TaskQueuePostParser, QueueStateGetParser, QueueStatePostParser
 from flask import current_app
 from common.common_resource import GlobalResource
-from azure.storage.queue import QueueClient
-from azure.core.exceptions import ResourceExistsError
 from azure.cosmos.exceptions import CosmosHttpResponseError
 from utils.file_utils import cal_tokens
 from azure.cosmos import CosmosClient
@@ -69,7 +67,7 @@ class QueueConcurrencyLock:
                         locked_at_time = datetime.fromisoformat(locked_at_str.replace('Z', '+00:00'))
                         timeout_threshold = current_time - timedelta(minutes=QueueConcurrencyLock.PROCESSING_TIMEOUT_MINUTES)
                         if locked_at_time < timeout_threshold:
-                            logger.warning(f"⚠️ 检测到{queue_name}锁槽位超时，强制释放：{slot.get('message_id')}")
+                            logger.warning(f"⚠️ 检测到{queue_name}锁槽位超时，强制释放：{slot.get('record_id')}")
                         else:
                             cleaned_slots.append(slot)
                     except:
@@ -88,7 +86,7 @@ class QueueConcurrencyLock:
             raise
 
     @staticmethod
-    def acquire_lock(queue_name: str, message_id: str, session_id: str = None) -> bool:
+    def acquire_lock(queue_name: str, record_id: str, session_id: str = None) -> bool:
         """
         获取队列处理锁
         """
@@ -113,7 +111,7 @@ class QueueConcurrencyLock:
                             }
                         
                         heavy_doc['processing_slots'].append({
-                            'message_id': message_id,
+                            'record_id': record_id,
                             'session_id': session_id,
                             'locked_at': datetime.now(timezone.utc).isoformat()
                         })
@@ -129,7 +127,7 @@ class QueueConcurrencyLock:
                             if e.status_code == 412: continue
                             raise
                     else:
-                        logger.info(f"⏳ heavy-queue 已有任务在运行，任务 {message_id} 等待中...")
+                        logger.info(f"⏳ heavy-queue 已有任务在运行，任务 {record_id} 等待中...")
                 
                 elif queue_name == "light-queue":
                     # 2. 确定 Light 任务的并发上限
@@ -148,7 +146,7 @@ class QueueConcurrencyLock:
                             }
                         
                         light_doc['processing_slots'].append({
-                            'message_id': message_id,
+                            'record_id': record_id,
                             'session_id': session_id,
                             'locked_at': datetime.now(timezone.utc).isoformat()
                         })
@@ -164,7 +162,7 @@ class QueueConcurrencyLock:
                             if e.status_code == 412: continue
                             raise
                     else:
-                        logger.info(f"⏳ light-queue 已达上限 ({len(light_slots)}/{max_light})，任务 {message_id} 等待中...")
+                        logger.info(f"⏳ light-queue 已达上限 ({len(light_slots)}/{max_light})，任务 {record_id} 等待中...")
 
                 time.sleep(QueueConcurrencyLock.RETRY_INTERVAL_SECONDS)
                 
@@ -173,11 +171,11 @@ class QueueConcurrencyLock:
                 time.sleep(QueueConcurrencyLock.RETRY_INTERVAL_SECONDS)
     
     @staticmethod
-    def release_lock(queue_name: str, message_id: str) -> bool:
+    def release_lock(queue_name: str, record_id: str) -> bool:
         """
         释放队列处理锁
         :param queue_name: 队列名称
-        :param message_id: 消息 ID
+        :param record_id: 数据库记录 ID
         :return: 是否成功释放锁
         """
         if queue_name == "heavy-queue":
@@ -198,7 +196,7 @@ class QueueConcurrencyLock:
             
             lock_doc['processing_slots'] = [
                 slot for slot in processing_slots 
-                if slot.get('message_id') != message_id
+                if slot.get('record_id') != record_id
             ]
             
             if len(lock_doc['processing_slots']) < original_count:
@@ -206,7 +204,7 @@ class QueueConcurrencyLock:
                 logger.info(f"✅ 成功释放{queue_name}锁槽位，当前活跃数：{len(lock_doc['processing_slots'])}")
                 return True
             else:
-                logger.warning(f"⚠️ 未找到要释放的锁槽位，message_id: {message_id}")
+                logger.warning(f"⚠️ 未找到要释放的锁槽位，record_id: {record_id}")
                 return False
                 
         except Exception as e:
@@ -294,22 +292,6 @@ class QueueState(GlobalResource):
             return None
 
     @staticmethod
-    def update_status_by_message_id(message_id: str, status: str) -> None:
-        """
-        根据 message_id 更新队列状态
-        :param message_id: 消息 ID
-        :param status: 新状态（queued, processing, completed, failed, parsed）
-        """
-        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.message_id = @message_id"
-        params = [{"name": "@message_id", "value": message_id}]
-        items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
-        for item in items:
-            item["status"] = status
-            item["update_time"] = datetime.now().isoformat()
-            current_app.container_task_queue.upsert_item(item)
-        logger.info(f"✅ Updated queue state to '{status}' for message_id: {message_id}")
-
-    @staticmethod
     def update_status_by_filename(username: str, filename: str, status: str) -> None:
         """
         根据用户名和文件名更新队列状态
@@ -340,19 +322,9 @@ class QueueState(GlobalResource):
             logger.error(f"❌ Failed to update status by filename: {e}")
 
     @staticmethod
-    def delete_by_message_id(message_id: str) -> None:
-        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.message_id = @message_id"
-        params = [{"name": "@message_id", "value": message_id}]
-        items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
-        for item in items:
-            doc_id = item.get("id")
-            if doc_id:
-                current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
-
-    @staticmethod
     def delete_by_filename(username: str, filename: str, session_id: str = None) -> None:
-        """根据用户名、文件名（可选：session_id）删除队列记录和消息"""
-        logger.info(f"🔵 Attempting to delete queue record and message for user: {username}, file: {filename}, session_id: {session_id}")
+        """根据用户名、文件名（可选：session_id）删除队列记录"""
+        logger.info(f"🔵 Attempting to delete queue record for user: {username}, file: {filename}, session_id: {session_id}")
         
         # 查询记录
         query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username"
@@ -380,31 +352,11 @@ class QueueState(GlobalResource):
                 logger.info(f"   Checking record {item.get('id')} (status: {item.get('status')}), attachments: {attachments}")
                 
                 if filename in attachments:
-                    # 找到匹配的记录
-                    message_id = item.get("message_id")
-                    pop_receipt = item.get("pop_receipt")
-                    queue_name = item.get("queue_name")
-                    status = item.get("status")
-                    
-                    # 从 Azure Queue 中删除消息（仅对 queued 状态）
-                    if status == 'queued' and message_id and pop_receipt and queue_name:
-                        try:
-                            connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-                            if connection_string:
-                                from azure.storage.queue import QueueClient
-                                queue_client = QueueClient.from_connection_string(connection_string, queue_name)
-                                queue_client.delete_message(message_id, pop_receipt)
-                                logger.info(f"✅ Deleted message {message_id} from queue {queue_name} for file {filename}")
-                            else:
-                                logger.warning(f"⚠️ AZURE_STORAGE_CONNECTION_STRING not set, skipping queue deletion")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Failed to delete message from queue: {e}")
-                    
                     # 从 Cosmos DB 中删除记录（所有状态）
                     doc_id = item.get("id")
                     if doc_id:
                         current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
-                        logger.info(f"✅ Deleted queue state record {doc_id} (status: {status}) for file {filename}")
+                        logger.info(f"✅ Deleted queue state record {doc_id} for file {filename}")
                         deleted_count += 1
             
             if deleted_count > 0:
@@ -416,12 +368,36 @@ class QueueState(GlobalResource):
             logger.error(f"❌ Error during delete_by_filename: {e}", exc_info=True)
             raise e
 
+    @staticmethod
+    def delete_all_by_username(username: str) -> int:
+        """
+        删除指定用户的所有队列记录
+        :param username: 用户名
+        :return: 删除的记录数量
+        """
+        logger.info(f"🔵 Deleting all queue records for user: {username}")
+        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username"
+        params = [{"name": "@username", "value": username}]
+        
+        try:
+            items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
+            deleted_count = 0
+            for item in items:
+                doc_id = item.get("id")
+                if doc_id:
+                    current_app.container_task_queue.delete_item(item=doc_id, partition_key=doc_id)
+                    deleted_count += 1
+            logger.info(f"✅ Successfully deleted {deleted_count} queue records for user {username}")
+            return deleted_count
+        except Exception as e:
+            logger.error(f"❌ Failed to delete all records for user {username}: {e}")
+            return 0
+
     def get(self):
         args_parser = QueueStateGetParser()
         args = args_parser.parser.parse_args()
         username = args.get("username")
         queue_name = args.get("queue_name")
-        message_id = args.get("message_id")
         status = args.get("status")
         query = "SELECT * FROM c WHERE c.type = 'queue_state'"
         params = []
@@ -431,9 +407,6 @@ class QueueState(GlobalResource):
         if queue_name:
             query += " AND c.queue_name = @queue_name"
             params.append({"name": "@queue_name", "value": queue_name})
-        if message_id:
-            query += " AND c.message_id = @message_id"
-            params.append({"name": "@message_id", "value": message_id})
         if status:
             query += " AND c.status = @status"
             params.append({"name": "@status", "value": status})
@@ -452,7 +425,6 @@ class QueueState(GlobalResource):
                 "username": item.get("username", ""),
                 "queue_name": q_name,
                 "message": item.get("message", ""),
-                "message_id": item.get("message_id", ""),
                 "status": item.get("status", ""),
                 "create_time": item.get("create_time", ""),
                 "update_time": item.get("update_time", "")
@@ -472,16 +444,12 @@ class QueueState(GlobalResource):
         username = args.get("username")
         queue_name = args.get("queue_name")
         message = args.get("message")
-        message_id = args.get("message_id")
-        pop_receipt = args.get("pop_receipt")
         status = args.get("status")
         session_id = args.get("session_id")
         doc_id = QueueState.create(
             username=username,
             queue_name=queue_name,
             message=message,
-            message_id=message_id,
-            pop_receipt=pop_receipt,
             status=status,
             session_id=session_id
         )
@@ -631,13 +599,6 @@ class TaskQueue(GlobalResource):
     HEAVY_QUEUE_THRESHOLD = 30000
 
     @staticmethod
-    def _get_queue_client(queue_name: str) -> QueueClient:
-        connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-        if not connection_string:
-            raise messages.InterfaceCallError("AZURE_STORAGE_CONNECTION_STRING not configured")
-        return QueueClient.from_connection_string(connection_string, queue_name)
-
-    @staticmethod
     def _truncate_message(message: str, limit: int = 1024) -> str:
         """
         Truncate message content if it exceeds the limit.
@@ -689,13 +650,6 @@ class TaskQueue(GlobalResource):
         message_json = json.dumps(message_payload)
 
         try:
-            queue_client = self._get_queue_client(queue_name)
-            try:
-                queue_client.create_queue()
-            except ResourceExistsError:
-                pass
-            
-            send_result = queue_client.send_message(message_json)
             queue_state_id = QueueState.create(
                 username=username,
                 queue_name=queue_name,
@@ -704,59 +658,21 @@ class TaskQueue(GlobalResource):
                 session_id=session_id
             )
             logger.info(f"✅ Created queue record {queue_state_id} for user {username}")
-            logger.info(f"user: {username} send message to queue: {queue_name}")
             return {
-                "message_id": send_result.id,
-                "pop_receipt": send_result.pop_receipt,
-                "insertion_time": str(send_result.inserted_on) if getattr(send_result, "inserted_on", None) else None,
                 "queue_state_id": queue_state_id,
                 "queue_name": queue_name,
                 "code": 200
             }
         except Exception as e:
-            logger.error(f"Failed to send message to queue {queue_name}: {e}")
-            return {"msg": str(e), "code": 500}
-
-    def get(self):
-        args_parser = TaskQueueGetParser()
-        args = args_parser.parser.parse_args()
-        username = args.get("username")
-        queue_name = args.get("queue_name")
-        max_messages = args.get("max_messages", 1)
-
-        if not username:
-            raise messages.UserNameNotExistsError
-
-        try:
-            queue_client = self._get_queue_client(queue_name)
-            messages_received = queue_client.receive_messages(messages_per_page=max_messages)
-            
-            result = []
-            for msg in messages_received:
-                try:
-                    content = json.loads(msg.content)
-                except:
-                    content = msg.content
-                
-                result.append({
-                    "message_id": msg.id,
-                    "pop_receipt": msg.pop_receipt,
-                    "content": content,
-                    "insertion_time": str(msg.inserted_on) if getattr(msg, "inserted_on", None) else None,
-                    "dequeue_count": msg.dequeue_count
-                })
-            
-            return {"messages": result, "count": len(result), "code": 200}
-        except Exception as e:
-            logger.error(f"Failed to receive messages from queue {queue_name}: {e}")
+            logger.error(f"Failed to create queue record for user {username}: {e}")
             return {"msg": str(e), "code": 500}
 
     @staticmethod
-    def process_with_lock(queue_name: str, message_id: str, processor_func, *args, **kwargs):
+    def process_with_lock(queue_name: str, record_id: str, processor_func, *args, **kwargs):
         """
         带锁的任务处理方法，确保同一时间只有指定数量的任务在处理
         :param queue_name: 队列名称 (heavy-queue 或 light-queue)
-        :param message_id: 消息 ID
+        :param record_id: 数据库记录 ID
         :param processor_func: 实际的处理函数
         :param args: 处理函数的参数
         :param kwargs: 处理函数的关键字参数
@@ -767,128 +683,40 @@ class TaskQueue(GlobalResource):
         try:
             # 1. 获取锁（会阻塞直到获取到锁）
             session_id = kwargs.get('session_id')
-            logger.info(f"🔵 开始为任务 {message_id} 获取{queue_name}锁 (session_id={session_id})...")
-            lock_acquired = QueueConcurrencyLock.acquire_lock(queue_name, message_id, session_id=session_id)
+            logger.info(f"🔵 开始为任务 {record_id} 获取{queue_name}锁 (session_id={session_id})...")
+            lock_acquired = QueueConcurrencyLock.acquire_lock(queue_name, record_id, session_id=session_id)
             
             if not lock_acquired:
-                logger.error(f"❌ 任务 {message_id} 获取锁失败")
+                logger.error(f"❌ 任务 {record_id} 获取锁失败")
                 raise Exception("Failed to acquire concurrency lock")
             
-            logger.info(f"✅ 任务 {message_id} 成功获取锁，开始处理...")
+            logger.info(f"✅ 任务 {record_id} 成功获取锁，开始处理...")
             
             # 2. 更新状态为 processing
-            QueueState.update_status_by_message_id(message_id, "processing")
+            QueueState.update_status_by_id(record_id, "processing")
             
             # 3. 执行实际的处理逻辑
             result = processor_func(*args, **kwargs)
             
             # 4. 更新状态为 parsed (表示文件已解析完成，AI 已返回响应)
-            # 注意：使用 'parsed' 而不是 'completed'，因为这是 session 级别的文件解析状态
-            QueueState.update_status_by_message_id(message_id, "parsed")
+            QueueState.update_status_by_id(record_id, "parsed")
             
-            logger.info(f"✅ 任务 {message_id} 处理完成，状态已更新为 'parsed'")
+            logger.info(f"✅ 任务 {record_id} 处理完成，状态已更新为 'parsed'")
             return result
             
         except Exception as e:
-            logger.error(f"❌ 任务 {message_id} 处理失败：{e}", exc_info=True)
-            QueueState.update_status_by_message_id(message_id, "failed")
+            logger.error(f"❌ 任务 {record_id} 处理失败：{e}", exc_info=True)
+            QueueState.update_status_by_id(record_id, "failed")
             raise e
             
         finally:
             # 5. 释放锁（无论成功或失败）
             if lock_acquired:
                 try:
-                    QueueConcurrencyLock.release_lock(queue_name, message_id)
-                    logger.info(f"✅ 任务 {message_id} 已释放锁")
+                    QueueConcurrencyLock.release_lock(queue_name, record_id)
+                    logger.info(f"✅ 任务 {record_id} 已释放锁")
                 except Exception as release_error:
                     logger.error(f"❌ 释放锁失败：{release_error}")
-
-    def put(self):
-        args_parser = TaskQueuePutParser()
-        args = args_parser.parser.parse_args()
-        username = args.get("username")
-        queue_name = args.get("queue_name")
-        message_id = args.get("message_id")
-        pop_receipt = args.get("pop_receipt")
-        message_content = args.get("message")
-        visibility_timeout = args.get("visibility_timeout", 0)
-
-        if not username:
-            raise messages.UserNameNotExistsError
-
-        try:
-            queue_client = self._get_queue_client(queue_name)
-            # Fetch current message to update its content but maintain other fields if needed
-            # Actually Azure Queue update_message replaces the content
-            # We should probably maintain the structure
-            
-            # Since we don't easily have the original message without receiving it, 
-            # we assume the update message_content is the full new content or we just update the 'message' field in JSON.
-            # But update_message is usually used for extending visibility timeout or small content updates.
-            
-            # Let's assume the user wants to update the 'message' part of the JSON.
-            # This is tricky without knowing the old content. 
-            # If the user provides a string, we'll wrap it in the JSON structure if it looks like it's meant to be that.
-            
-            # For simplicity, we'll just send the new message_content. 
-            # If it's not JSON, we'll wrap it.
-            
-            try:
-                # Try to see if it's already a full payload
-                json_payload = json.loads(message_content)
-                if not all(k in json_payload for k in ["user-name", "status"]):
-                    raise ValueError
-                message_json = message_content
-            except:
-                # Wrap it
-                message_payload = {
-                    "user-name": username,
-                    "queue_name": queue_name,
-                    "status": "updated",
-                    "create_time": datetime.now().isoformat(),
-                    "message": self._truncate_message(message_content)
-                }
-                message_json = json.dumps(message_payload)
-
-            update_result = queue_client.update_message(
-                message_id, 
-                pop_receipt, 
-                content=message_json, 
-                visibility_timeout=visibility_timeout
-            )
-            
-            QueueState.update_status_by_message_id(message_id, "updated")
-            
-            return {
-                "message_id": message_id,
-                "pop_receipt": update_result.pop_receipt,
-                "next_visible_on": str(update_result.next_visible_on) if getattr(update_result, "next_visible_on", None) else None,
-                "code": 200
-            }
-        except Exception as e:
-            logger.error(f"Failed to update message in queue {queue_name}: {e}")
-            return {"msg": str(e), "code": 500}
-
-    def delete(self):
-        args_parser = TaskQueueDeleteParser()
-        args = args_parser.parser.parse_args()
-        username = args.get("username")
-        queue_name = args.get("queue_name")
-        message_id = args.get("message_id")
-        pop_receipt = args.get("pop_receipt")
-
-        if not username:
-            raise messages.UserNameNotExistsError
-
-        try:
-            queue_client = self._get_queue_client(queue_name)
-            queue_client.delete_message(message_id, pop_receipt)
-            QueueState.delete_by_message_id(message_id)
-            logger.info(f"user: {username} delete message from queue: {queue_name}")
-            return {"msg": "success", "code": 200}
-        except Exception as e:
-            logger.error(f"Failed to delete message from queue {queue_name}: {e}")
-            return {"msg": str(e), "code": 500}
 
 
 class DeleteUploadedRecord(GlobalResource):
@@ -1051,40 +879,10 @@ class SubmitQueuedTasks(GlobalResource):
                         
                         logger.info(f"✅ Submitted task for file: {file_attachments}, queue: {item.get('queue_name')}")
                         
-                        # 实际发送到 Azure Queue
-                        queue_name = item.get('queue_name', 'light-queue')
-                        connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-                        
-                        if connection_string:
-                            from azure.storage.queue import QueueClient
-                            from azure.core.exceptions import ResourceExistsError
-                            queue_client = QueueClient.from_connection_string(connection_string, queue_name)
-                            try:
-                                queue_client.create_queue()
-                            except ResourceExistsError:
-                                pass
-                            
-                            # Ensure message is not too large before sending
-                            # Since item['message'] is already JSON, we need to parse it, truncate the 'message' field, and re-serialize
-                            try:
-                                msg_data = json.loads(item['message'])
-                                if 'message' in msg_data:
-                                    msg_data['message'] = TaskQueue._truncate_message(msg_data['message'])
-                                final_message = json.dumps(msg_data)
-                            except:
-                                final_message = item['message']
-                                
-                            send_result = queue_client.send_message(final_message)
-                            logger.info(f"✅ Sent to queue {queue_name}, message_id: {send_result.id}")
-                            
-                            # 更新 DB 记录
-                            item['status'] = 'queued'
-                            current_app.container_task_queue.upsert_item(item)
-                        
                         submitted_count += 1
                         results.append({
                             'filename': file_attachments,
-                            'queue_name': queue_name,
+                            'queue_name': item.get('queue_name', 'light-queue'),
                             'status': 'queued'
                         })
                         
@@ -1124,13 +922,13 @@ class ProcessTaskWithLock(GlobalResource):
             data = request.get_json()
             username = data.get('username')
             queue_name = data.get('queue_name')
-            message_id = data.get('message_id')
+            record_id = data.get('record_id')
             session_id = data.get('session_id')
             
             if not username:
                 raise messages.UserNameNotExistsError
             
-            logger.info(f"🔵 ProcessTaskWithLock: user={username}, queue={queue_name}, message_id={message_id}, session_id={session_id}")
+            logger.info(f"🔵 ProcessTaskWithLock: user={username}, queue={queue_name}, record_id={record_id}, session_id={session_id}")
             
             # 定义实际的处理函数
             def actual_processor(message_data, attachments):
@@ -1154,7 +952,7 @@ class ProcessTaskWithLock(GlobalResource):
             # 使用带锁的处理方法
             result = TaskQueue.process_with_lock(
                 queue_name=queue_name,
-                message_id=message_id,
+                record_id=record_id,
                 processor_func=lambda: actual_processor(data, [username]),
                 username=username,
                 attachment_names=[username],
@@ -1185,13 +983,13 @@ system_api.add_resource(ProcessTaskWithLock, "/process_task_with_lock")
 # 使用示例和辅助函数
 # ============================================================
 
-def call_with_queue_lock(username: str, queue_name: str, message_id: str, attachment_names: list, message_data: dict, processor_func=None):
+def call_with_queue_lock(username: str, queue_name: str, record_id: str, attachment_names: list, message_data: dict, processor_func=None):
     """
     调用带队列锁的任务处理（参考 call_openai_with_global_lock_gpt5）
     
     :param username: 用户名
     :param queue_name: 队列名称 (heavy-queue 或 light-queue)
-    :param message_id: 消息 ID
+    :param record_id: 数据库记录 ID
     :param attachment_names: 附件名称列表
     :param message_data: 消息数据
     :param processor_func: 实际的处理函数，如果为 None 则使用默认处理
@@ -1204,14 +1002,14 @@ def call_with_queue_lock(username: str, queue_name: str, message_id: str, attach
         data = request.get_json()
         username = data.get('username')
         queue_name = data.get('queue_name')
-        message_id = data.get('message_id')
+        record_id = data.get('record_id')
         attachment_names = data.get('attachment_names')
         
         try:
             result = call_with_queue_lock(
                 username=username,
                 queue_name=queue_name,
-                message_id=message_id,
+                record_id=record_id,
                 attachment_names=attachment_names,
                 message_data=data,
                 processor_func=your_actual_processing_function
@@ -1228,7 +1026,7 @@ def call_with_queue_lock(username: str, queue_name: str, message_id: str, attach
         
         result = TaskQueue.process_with_lock(
             queue_name=queue_name,
-            message_id=message_id,
+            record_id=record_id,
             processor_func=processor_func,
             username=username,
             attachment_names=attachment_names,

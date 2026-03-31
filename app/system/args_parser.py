@@ -101,40 +101,11 @@ class TaskQueuePostParser(BaseArgsParser):
         return InfoAuth.validate_username(value)
 
 
-class TaskQueuePutParser(BaseArgsParser):
-    def __init__(self):
-        super().__init__()
-        self.parser.add_argument('username', type=str, required=True, help="ユーザー名")
-        self.parser.add_argument('queue_name', type=str, required=True, help="キュー名")
-        self.parser.add_argument('message_id', type=str, required=True, help="メッセージID")
-        self.parser.add_argument('pop_receipt', type=str, required=True, help="pop receipt")
-        self.parser.add_argument('message', type=str, required=True, help="更新メッセージ内容")
-        self.parser.add_argument('visibility_timeout', type=int, default=0, help="不可視タイムアウト")
-
-
-class TaskQueueGetParser(BaseArgsParser):
-    def __init__(self):
-        super().__init__()
-        self.parser.add_argument('username', type=str, required=True, location='args', help="ユーザー名")
-        self.parser.add_argument('queue_name', type=str, required=True, location='args', help="キュー名")
-        self.parser.add_argument('max_messages', type=int, default=1, location='args', help="最大メッセージ数")
-
-
-class TaskQueueDeleteParser(BaseArgsParser):
-    def __init__(self):
-        super().__init__()
-        self.parser.add_argument('username', type=str, required=True, location=['json', 'args'], help="ユーザー名")
-        self.parser.add_argument('queue_name', type=str, required=True, location=['json', 'args'], help="キュー名")
-        self.parser.add_argument('message_id', type=str, required=True, location=['json', 'args'], help="メッセージID")
-        self.parser.add_argument('pop_receipt', type=str, location=['json', 'args'], help="pop receipt")
-
-
 class QueueStateGetParser(BaseArgsParser):
     def __init__(self):
         super().__init__()
         self.parser.add_argument('username', type=str, location='args')
         self.parser.add_argument('queue_name', type=str, location='args')
-        self.parser.add_argument('message_id', type=str, location='args')
         self.parser.add_argument('status', type=str, location='args')
 
 
@@ -144,7 +115,5 @@ class QueueStatePostParser(BaseArgsParser):
         self.parser.add_argument('username', type=str, required=True, help="ユーザー名")
         self.parser.add_argument('queue_name', type=str, required=True, help="キュー名")
         self.parser.add_argument('message', type=str, required=True, help="メッセージ内容")
-        self.parser.add_argument('message_id', type=str, required=True, help="メッセージID")
-        self.parser.add_argument('pop_receipt', type=str, help="pop receipt")
         self.parser.add_argument('status', type=str, required=True, help="ステータス")
         self.parser.add_argument('session_id', type=str, help="セッションID")

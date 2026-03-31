@@ -453,10 +453,10 @@ class FileManagement(GlobalResource):
             raise messages.UserNameNotExistsError
         if filename:
             try:
-                # 1. Delete Queue Message and Cosmos Record (Filtered by session_id if provided)
+                # 1. Delete Cosmos DB Queue State Record (Filtered by session_id if provided)
                 try:
                     QueueState.delete_by_filename(username, filename, session_id)
-                    logger.info(f"✅ Deleted queue records and messages for user {username}, file {filename}, session {session_id}")
+                    logger.info(f"✅ Deleted queue state records for user {username}, file {filename}, session {session_id}")
                 except Exception as q_err:
                     logger.error(f"❌ Failed to delete queue records for file {filename}: {q_err}")
 
@@ -507,27 +507,20 @@ class FileManagement(GlobalResource):
                 return {"msg": f"{filename}ファイルが存在しないか、削除された", "code": 200}
         else:
             try:
-                # Delete all blobs for user
-                blobs_to_delete = list(current_app.container_client.list_blobs(name_starts_with=username))
+                # 1. 先清理 Cosmos DB 中的所有队列记录（即使没有 Blob 也要清理）
+                deleted_db_count = QueueState.delete_all_by_username(username)
+                logger.info(f"✅ Deleted {deleted_db_count} queue state records for user: {username}")
+
+                # 2. 再清理 Blob Storage
+                blobs_to_delete = list(current_app.container_client.list_blobs(name_starts_with=f"{username}/"))
                 if blobs_to_delete:
                     current_app.container_client.delete_blobs(*[blob.name for blob in blobs_to_delete])
-                    
-                    # Also delete all queue records/messages for this user
-                    # We can iterate through blobs or just call a general delete for the user
-                    for blob in blobs_to_delete:
-                        # Extract just the filename from blob.name (which is "username/filename")
-                        fname = blob.name.split("/")[-1] if "/" in blob.name else blob.name
-                        try:
-                            QueueState.delete_by_filename(username, fname)
-                        except:
-                            pass
+                    logger.info(f"✅ Deleted {len(blobs_to_delete)} blobs for user: {username}")
                             
-                    return {"msg": "すべてのファイルの削除が成功しました", "code": 200}
-                else:
-                    return {"msg": "ファイルが存在しないか、削除された", "code": 200}
+                return {"msg": "すべてのファイルの削除が成功しました", "code": 200}
             except Exception as e:
-                return {"msg": str(e), "code": 200}
-                # return {"msg": "ファイルが存在しないか、削除された", "code": 200}
+                logger.error(f"❌ Logout cleanup failed for user {username}: {e}")
+                return {"msg": str(e), "code": 500}
 
     @staticmethod
     def allowed_file(filename):

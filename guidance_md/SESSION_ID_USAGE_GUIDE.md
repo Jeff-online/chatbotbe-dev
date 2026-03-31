@@ -239,13 +239,9 @@ def delete_session_with_files(username, session_id):
     params = [{"name": "@session_id", "value": session_id}]
     items = list(container.query_items(query=query, parameters=params))
     
-    # 3. 删除所有文件记录
+    # 3. 删除所有文件记录（Cosmos DB）
     for item in items:
-        # 如果是 queued 状态，先清理 Azure Queue
-        if item.get('status') == 'queued':
-            queue_client.delete_message(item['message_id'], item['pop_receipt'])
-        
-        # 删除 Cosmos DB 记录
+        # 直接从 Cosmos DB 删除记录
         container.delete_item(item=item['id'], partition_key=item['id'])
     
     # 4. 删除 Blob 存储
