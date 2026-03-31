@@ -496,18 +496,17 @@ class QueueStats(GlobalResource):
         args = args_parser.parser.parse_args()
         username = args.get("username")
         
-        # 1. 查询当前用户的待处理任务（queued, processing）
-        query_pending = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status IN ('queued', 'processing')"
-        params_pending = []
-        if username:
-            query_pending += " AND c.username = @username"
-            params_pending.append({"name": "@username", "value": username})
+        # 1. 查询当前用户的详细待处理信息 (用于前端本地状态更新)
+        query_user_pending = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status IN ('queued', 'processing')"
+        params_user = [{"name": "@username", "value": username}] if username else []
         
-        items_pending = list(current_app.container_task_queue.query_items(
-            query=query_pending, 
-            parameters=params_pending,
-            enable_cross_partition_query=True
-        ))
+        items_user_pending = []
+        if username:
+            items_user_pending = list(current_app.container_task_queue.query_items(
+                query=query_user_pending, 
+                parameters=params_user,
+                enable_cross_partition_query=True
+            ))
         
         # 2. 查询指定用户的已解析完成任务
         query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status = 'parsed'"
@@ -522,22 +521,22 @@ class QueueStats(GlobalResource):
             enable_cross_partition_query=True
         ))
         
-        # 3. 计算排队位置（前面有多少个其他用户的任务）
-        # 查询所有人的排队任务来计算位置
-        query_all_queue = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status IN ('queued', 'processing')"
+        # 3. 计算全局排队位置 (前面排队的附件总数)
+        # 按照用户建议的排序规则查询所有正在排队或处理的任务
+        query_all_queue = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status IN ('queued', 'processing') ORDER BY c._ts, c.session_id"
         all_queue_items = list(current_app.container_task_queue.query_items(
             query=query_all_queue, 
             enable_cross_partition_query=True
         ))
         
-        # 统计待处理详情
+        # 统计当前用户的待处理详情
         total_pending = 0
         light_queue_pending = 0
         heavy_queue_pending = 0
         light_attachment_names = []
         heavy_attachment_names = []
         
-        for item in items_pending:
+        for item in items_user_pending:
             q_name = item.get("queue_name", "")
             message_data = item.get("message", {})
             if isinstance(message_data, str):
@@ -564,20 +563,20 @@ class QueueStats(GlobalResource):
             attachment_names = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
             if attachment_names: parsed_attachment_names.extend(attachment_names)
         
-        # 计算排队位置 (前面排队的附件总数)
-        sorted_all = sorted(all_queue_items, key=lambda x: x.get('create_time', ''))
+        # 精确计算排队位置 (排在当前用户第一个活跃任务前的所有附件总数)
         queue_position = 0
         if username:
             user_task_index = -1
-            for i, task in enumerate(sorted_all):
+            # 在已排序的全局队列中找到当前用户的第一个任务
+            for i, task in enumerate(all_queue_items):
                 if task.get("username") == username:
                     user_task_index = i
                     break
             
             if user_task_index > 0:
-                # 统计排在当前用户任务前面的所有附件总数
+                # 累加排在前面的所有任务的附件数量
                 for i in range(user_task_index):
-                    ahead_task = sorted_all[i]
+                    ahead_task = all_queue_items[i]
                     msg_data = ahead_task.get("message", {})
                     if isinstance(msg_data, str):
                         try: msg_data = json.loads(msg_data)
@@ -586,6 +585,16 @@ class QueueStats(GlobalResource):
                     if isinstance(msg_data, dict):
                         ahead_attachments = msg_data.get("attachment_names", [])
                         queue_position += len(ahead_attachments)
+            elif user_task_index == -1:
+                # 如果当前用户的任务还没进入 queued/processing 状态 (还在 uploaded 状态)
+                # 那么全局所有正在排队/处理的任务都算在前面
+                for task in all_queue_items:
+                    msg_data = task.get("message", {})
+                    if isinstance(msg_data, str):
+                        try: msg_data = json.loads(msg_data)
+                        except: pass
+                    if isinstance(msg_data, dict):
+                        queue_position += len(msg_data.get("attachment_names", []))
         
         return {
             "total_pending": total_pending,
