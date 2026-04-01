@@ -298,7 +298,7 @@ class QueueState(GlobalResource):
         """
         根据 message_id 更新队列状态
         :param message_id: 消息 ID
-        :param status: 新状态（queued, processing, completed, failed, parsed）
+        :param status: 新状态（queued, processing, failed, parsed）
         """
         query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.message_id = @message_id"
         params = [{"name": "@message_id", "value": message_id}]
@@ -492,33 +492,38 @@ class QueueStats(GlobalResource):
     
     def get(self):
         """获取队列统计信息（包含待处理和已解析）"""
-        args_parser = QueueStateGetParser()
-        args = args_parser.parser.parse_args()
-        username = args.get("username")
-        
-        # 1. 查询所有活跃任务（用于计算排队位置和当前用户待处理）
-        # 增加时间过滤，只查询最近 24 小时内的活跃任务，避免被陈旧数据干扰
-        yesterday = (datetime.now() - timedelta(hours=24)).isoformat()
-        query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed', 'completed') AND c.create_time > @yesterday"
-        params_active = [{"name": "@yesterday", "value": yesterday}]
-        
-        all_active_items = []
         try:
-            all_active_items = list(current_app.container_task_queue.query_items(
-                query=query_all_active, 
-                parameters=params_active,
-                enable_cross_partition_query=True
-            ))
-            logger.info(f"🔍 [QueueStats] Found {len(all_active_items)} total active items in last 24h")
-        except Exception as e:
-            logger.error(f"❌ Error querying active items: {e}")
-        
-        # 2. 查询指定用户的已解析完成任务 (用于前端确认解析成功)
-        query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status IN ('parsed', 'completed')"
-        params_parsed = [{"name": "@username", "value": username}] if username else []
-        
-        items_parsed = []
-        if username:
+            args_parser = QueueStateGetParser()
+            args = args_parser.parser.parse_args()
+            username = args.get("username")
+            
+            if not username:
+                return {"msg": "Username is required", "code": 400}
+            
+            # 1. 查询所有活跃任务
+            # 扩大时间范围到 48 小时，确保不会漏掉跨天任务
+            active_window = (datetime.now() - timedelta(hours=48)).isoformat()
+            query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed') AND c.create_time > @window"
+            params_active = [{"name": "@window", "value": active_window}]
+            
+            all_active_items = []
+            try:
+                all_active_items = list(current_app.container_task_queue.query_items(
+                    query=query_all_active, 
+                    parameters=params_active,
+                    enable_cross_partition_query=True
+                ))
+            except Exception as e:
+                logger.error(f"❌ QueueStats: Error querying active items: {e}")
+            
+            # 2. 查询已解析完成的任务
+            query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status = 'parsed' AND c.create_time > @window"
+            params_parsed = [
+                {"name": "@username", "value": username},
+                {"name": "@window", "value": active_window}
+            ]
+            
+            items_parsed = []
             try:
                 items_parsed = list(current_app.container_task_queue.query_items(
                     query=query_parsed,
@@ -526,100 +531,85 @@ class QueueStats(GlobalResource):
                     enable_cross_partition_query=True
                 ))
             except Exception as e:
-                logger.error(f"❌ Error querying parsed items: {e}")
-        
-        # 3. 统计当前用户的待处理详情和计算最早任务时间
-        total_pending = 0
-        light_queue_pending = 0
-        heavy_queue_pending = 0
-        light_attachment_names = []
-        heavy_attachment_names = []
-        user_earliest_time = None
-        
-        items_user_pending = [item for item in all_active_items if item.get("username") == username]
-        
-        for item in items_user_pending:
-            create_time_str = item.get("create_time")
-            if create_time_str:
-                try:
-                    current_time = datetime.fromisoformat(create_time_str)
-                    if user_earliest_time is None or current_time < user_earliest_time:
-                        user_earliest_time = current_time
-                except:
-                    pass
+                logger.error(f"❌ QueueStats: Error querying parsed items: {e}")
             
-            q_name = item.get("queue_name", "")
-            message_data = item.get("message", {})
-            if isinstance(message_data, str):
-                try: message_data = json.loads(message_data)
-                except: pass
+            # 3. 统计逻辑
+            total_pending = 0
+            light_queue_pending = 0
+            heavy_queue_pending = 0
+            light_attachment_names = []
+            heavy_attachment_names = []
+            user_earliest_time = None
             
-            attachments = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
-            
-            total_pending += 1
-            if q_name == "light-queue":
-                light_queue_pending += 1
-                if attachments: light_attachment_names.extend(attachments)
-            elif q_name == "heavy-queue":
-                heavy_queue_pending += 1
-                if attachments: heavy_attachment_names.extend(attachments)
-        
-        # 统计已解析
-        total_parsed = len(items_parsed)
-        parsed_attachment_names = []
-        for item in items_parsed:
-            message_data = item.get("message", {})
-            if isinstance(message_data, str):
-                try: message_data = json.loads(message_data)
-                except: pass
-            attachments = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
-            if attachments: parsed_attachment_names.extend(attachments)
-        
-        # 4. 计算排队位置：统计所有排在当前用户最早任务之前的其他用户的附件总数
-        queue_position = 0
-        if username and user_earliest_time:
-            logger.info(f"🔍 [DEBUG] 计算 {username} 排队位置，最早任务时间: {user_earliest_time}")
-            for task in all_active_items:
-                task_username = task.get("username", "")
-                
-                # 只统计其他用户的任务
-                if task_username != username:
-                    task_create_time_str = task.get("create_time")
-                    if task_create_time_str:
+            for item in all_active_items:
+                task_username = item.get("username")
+                if task_username == username:
+                    total_pending += 1
+                    create_time_str = item.get("create_time")
+                    if create_time_str:
                         try:
-                            task_time = datetime.fromisoformat(task_create_time_str)
-                            # 仅统计早于当前用户最早任务的任务
-                            if task_time >= user_earliest_time:
-                                continue
-                        except:
-                            pass
+                            t = datetime.fromisoformat(create_time_str)
+                            if user_earliest_time is None or t < user_earliest_time:
+                                user_earliest_time = t
+                        except: pass
                     
-                    msg_data = task.get("message", {})
+                    q_name = item.get("queue_name", "")
+                    msg_data = item.get("message", {})
                     if isinstance(msg_data, str):
                         try: msg_data = json.loads(msg_data)
                         except: pass
                     
-                    attachments = []
-                    if isinstance(msg_data, dict):
-                        attachments = msg_data.get("attachment_names", [])
-                    
-                    queue_position += len(attachments)
+                    attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
+                    if q_name == "light-queue":
+                        light_queue_pending += 1
+                        if attachments: light_attachment_names.extend(attachments)
+                    elif q_name == "heavy-queue":
+                        heavy_queue_pending += 1
+                        if attachments: heavy_attachment_names.extend(attachments)
             
-            logger.info(f"📊 Calculated queue_position for {username}: {queue_position}")
-        else:
+            # 4. 计算排队位置
             queue_position = 0
-        
-        return {
-            "total_pending": total_pending,
-            "light_queue_pending": light_queue_pending,
-            "heavy_queue_pending": heavy_queue_pending,
-            "light_attachment_names": light_attachment_names,
-            "heavy_attachment_names": heavy_attachment_names,
-            "total_parsed": total_parsed,
-            "parsed_attachment_names": parsed_attachment_names,
-            "queue_position": queue_position,
-            "code": 200
-        }
+            if user_earliest_time:
+                for task in all_active_items:
+                    if task.get("username") != username:
+                        task_time_str = task.get("create_time")
+                        if task_time_str:
+                            try:
+                                if datetime.fromisoformat(task_time_str) < user_earliest_time:
+                                    msg_data = task.get("message", {})
+                                    if isinstance(msg_data, str):
+                                        try: msg_data = json.loads(msg_data)
+                                        except: pass
+                                    attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
+                                    queue_position += len(attachments)
+                            except: pass
+            
+            # 统计已解析附件名
+            parsed_attachment_names = []
+            for item in items_parsed:
+                msg_data = item.get("message", {})
+                if isinstance(msg_data, str):
+                    try: msg_data = json.loads(msg_data)
+                    except: pass
+                attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
+                if attachments: parsed_attachment_names.extend(attachments)
+            
+            logger.info(f"📊 QueueStats for {username}: pending={total_pending}, position={queue_position}, parsed={len(items_parsed)}")
+            
+            return {
+                "total_pending": total_pending,
+                "light_queue_pending": light_queue_pending,
+                "heavy_queue_pending": heavy_queue_pending,
+                "light_attachment_names": light_attachment_names,
+                "heavy_attachment_names": heavy_attachment_names,
+                "total_parsed": len(items_parsed),
+                "parsed_attachment_names": parsed_attachment_names,
+                "queue_position": queue_position,
+                "code": 200
+            }
+        except Exception as e:
+            logger.error(f"💥 QueueStats Global Error: {e}", exc_info=True)
+            return {"msg": "Internal Server Error", "code": 500}
 
 
 class TaskQueue(GlobalResource):
@@ -778,7 +768,6 @@ class TaskQueue(GlobalResource):
             result = processor_func(*args, **kwargs)
             
             # 4. 更新状态为 parsed (表示文件已解析完成，AI 已返回响应)
-            # 注意：使用 'parsed' 而不是 'completed'，因为这是 session 级别的文件解析状态
             QueueState.update_status_by_message_id(message_id, "parsed")
             
             logger.info(f"✅ 任务 {message_id} 处理完成，状态已更新为 'parsed'")
