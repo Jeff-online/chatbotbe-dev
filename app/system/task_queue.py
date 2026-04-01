@@ -496,23 +496,25 @@ class QueueStats(GlobalResource):
         args = args_parser.parser.parse_args()
         username = args.get("username")
         
-        # 1. 查询当前用户的待处理信息 (用于前端统计本地状态)
-        query_user_pending = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status NOT IN ('parsed', 'failed')"
-        params_user = [{"name": "@username", "value": username}] if username else []
+        # 1. 查询所有活跃任务（用于计算排队位置和当前用户待处理）
+        # 增加时间过滤，只查询最近 24 小时内的活跃任务，避免被陈旧数据干扰
+        yesterday = (datetime.now() - timedelta(hours=24)).isoformat()
+        query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed', 'completed') AND c.create_time > @yesterday"
+        params_active = [{"name": "@yesterday", "value": yesterday}]
         
-        items_user_pending = []
-        if username:
-            try:
-                items_user_pending = list(current_app.container_task_queue.query_items(
-                    query=query_user_pending, 
-                    parameters=params_user,
-                    enable_cross_partition_query=True
-                ))
-            except Exception as e:
-                logger.error(f"❌ Error querying user pending items: {e}")
+        all_active_items = []
+        try:
+            all_active_items = list(current_app.container_task_queue.query_items(
+                query=query_all_active, 
+                parameters=params_active,
+                enable_cross_partition_query=True
+            ))
+            logger.info(f"🔍 [QueueStats] Found {len(all_active_items)} total active items in last 24h")
+        except Exception as e:
+            logger.error(f"❌ Error querying active items: {e}")
         
-        # 2. 查询指定用户的已解析完成任务
-        query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status = 'parsed'"
+        # 2. 查询指定用户的已解析完成任务 (用于前端确认解析成功)
+        query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status IN ('parsed', 'completed')"
         params_parsed = [{"name": "@username", "value": username}] if username else []
         
         items_parsed = []
@@ -526,29 +528,16 @@ class QueueStats(GlobalResource):
             except Exception as e:
                 logger.error(f"❌ Error querying parsed items: {e}")
         
-        # 3. 计算全局排队位置 (仅统计排在当前用户最早任务之前的其他用户的附件总数)
-        # 查询所有非完成状态的任务
-        query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed')"
-        
-        all_active_items = []
-        try:
-            all_active_items = list(current_app.container_task_queue.query_items(
-                query=query_all_active, 
-                enable_cross_partition_query=True
-            ))
-            logger.info(f"🔍 Found {len(all_active_items)} total active queue items in database")
-        except Exception as e:
-            logger.error(f"❌ Error querying all active items: {e}")
-        
-        # 统计当前用户的待处理详情
+        # 3. 统计当前用户的待处理详情和计算最早任务时间
         total_pending = 0
         light_queue_pending = 0
         heavy_queue_pending = 0
         light_attachment_names = []
         heavy_attachment_names = []
-        
-        # 找到当前用户最早的活跃任务时间
         user_earliest_time = None
+        
+        items_user_pending = [item for item in all_active_items if item.get("username") == username]
+        
         for item in items_user_pending:
             create_time_str = item.get("create_time")
             if create_time_str:
@@ -564,15 +553,16 @@ class QueueStats(GlobalResource):
             if isinstance(message_data, str):
                 try: message_data = json.loads(message_data)
                 except: pass
-            attachment_names = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
+            
+            attachments = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
             
             total_pending += 1
             if q_name == "light-queue":
                 light_queue_pending += 1
-                if attachment_names: light_attachment_names.extend(attachment_names)
+                if attachments: light_attachment_names.extend(attachments)
             elif q_name == "heavy-queue":
                 heavy_queue_pending += 1
-                if attachment_names: heavy_attachment_names.extend(attachment_names)
+                if attachments: heavy_attachment_names.extend(attachments)
         
         # 统计已解析
         total_parsed = len(items_parsed)
@@ -582,29 +572,27 @@ class QueueStats(GlobalResource):
             if isinstance(message_data, str):
                 try: message_data = json.loads(message_data)
                 except: pass
-            attachment_names = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
-            if attachment_names: parsed_attachment_names.extend(attachment_names)
+            attachments = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
+            if attachments: parsed_attachment_names.extend(attachments)
         
-        # 计算排队位置：统计所有排在当前用户最早任务之前的其他用户的附件总数
+        # 4. 计算排队位置：统计所有排在当前用户最早任务之前的其他用户的附件总数
         queue_position = 0
-        if username:
-            logger.info(f"🔍 [DEBUG] 开始计算 {username} 的排队位置，用户最早任务时间: {user_earliest_time}")
+        if username and user_earliest_time:
+            logger.info(f"🔍 [DEBUG] 计算 {username} 排队位置，最早任务时间: {user_earliest_time}")
             for task in all_active_items:
                 task_username = task.get("username", "")
                 
                 # 只统计其他用户的任务
                 if task_username != username:
-                    # 如果当前用户有活跃任务，则只统计时间早于当前用户的任务
-                    if user_earliest_time:
-                        task_create_time_str = task.get("create_time")
-                        if task_create_time_str:
-                            try:
-                                task_time = datetime.fromisoformat(task_create_time_str)
-                                if task_time >= user_earliest_time:
-                                    logger.info(f"   ⏭️  跳过晚于/等于当前用户的任务：user={task_username}, time={task_create_time_str}")
-                                    continue
-                            except:
-                                pass
+                    task_create_time_str = task.get("create_time")
+                    if task_create_time_str:
+                        try:
+                            task_time = datetime.fromisoformat(task_create_time_str)
+                            # 仅统计早于当前用户最早任务的任务
+                            if task_time >= user_earliest_time:
+                                continue
+                        except:
+                            pass
                     
                     msg_data = task.get("message", {})
                     if isinstance(msg_data, str):
@@ -615,12 +603,11 @@ class QueueStats(GlobalResource):
                     if isinstance(msg_data, dict):
                         attachments = msg_data.get("attachment_names", [])
                     
-                    logger.info(f"   ✅ 计入排队：user={task_username}, attachments={len(attachments)}, time={task.get('create_time')}")
                     queue_position += len(attachments)
-                else:
-                    logger.info(f"   ⏭️  跳过当前用户：user={task_username}")
             
             logger.info(f"📊 Calculated queue_position for {username}: {queue_position}")
+        else:
+            queue_position = 0
         
         return {
             "total_pending": total_pending,
