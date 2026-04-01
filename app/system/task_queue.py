@@ -526,7 +526,7 @@ class QueueStats(GlobalResource):
             except Exception as e:
                 logger.error(f"❌ Error querying parsed items: {e}")
         
-        # 3. 计算全局排队位置 (排在当前用户前面的所有其他用户的附件总数)
+        # 3. 计算全局排队位置 (仅统计排在当前用户最早任务之前的其他用户的附件总数)
         # 查询所有非完成状态的任务
         query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed')"
         
@@ -547,7 +547,18 @@ class QueueStats(GlobalResource):
         light_attachment_names = []
         heavy_attachment_names = []
         
+        # 找到当前用户最早的活跃任务时间
+        user_earliest_time = None
         for item in items_user_pending:
+            create_time_str = item.get("create_time")
+            if create_time_str:
+                try:
+                    current_time = datetime.fromisoformat(create_time_str)
+                    if user_earliest_time is None or current_time < user_earliest_time:
+                        user_earliest_time = current_time
+                except:
+                    pass
+            
             q_name = item.get("queue_name", "")
             message_data = item.get("message", {})
             if isinstance(message_data, str):
@@ -574,29 +585,42 @@ class QueueStats(GlobalResource):
             attachment_names = message_data.get("attachment_names", []) if isinstance(message_data, dict) else []
             if attachment_names: parsed_attachment_names.extend(attachment_names)
         
-        # 计算排队位置：统计所有其他用户的附件总数（不包括当前用户）
+        # 计算排队位置：统计所有排在当前用户最早任务之前的其他用户的附件总数
         queue_position = 0
         if username:
-            logger.info(f"🔍 [DEBUG] 开始计算 {username} 的排队位置，总共查询到 {len(all_active_items)} 条活跃记录")
+            logger.info(f"🔍 [DEBUG] 开始计算 {username} 的排队位置，用户最早任务时间: {user_earliest_time}")
             for task in all_active_items:
                 task_username = task.get("username", "")
-                msg_data = task.get("message", {})
-                if isinstance(msg_data, str):
-                    try: msg_data = json.loads(msg_data)
-                    except: pass
                 
-                attachments = []
-                if isinstance(msg_data, dict):
-                    attachments = msg_data.get("attachment_names", [])
-                
-                # 只统计其他用户的任务，跳过当前用户的任务
+                # 只统计其他用户的任务
                 if task_username != username:
-                    logger.info(f"   ✅ 计入排队：user={task_username}, attachments={len(attachments)}, files={attachments}")
+                    # 如果当前用户有活跃任务，则只统计时间早于当前用户的任务
+                    if user_earliest_time:
+                        task_create_time_str = task.get("create_time")
+                        if task_create_time_str:
+                            try:
+                                task_time = datetime.fromisoformat(task_create_time_str)
+                                if task_time >= user_earliest_time:
+                                    logger.info(f"   ⏭️  跳过晚于/等于当前用户的任务：user={task_username}, time={task_create_time_str}")
+                                    continue
+                            except:
+                                pass
+                    
+                    msg_data = task.get("message", {})
+                    if isinstance(msg_data, str):
+                        try: msg_data = json.loads(msg_data)
+                        except: pass
+                    
+                    attachments = []
+                    if isinstance(msg_data, dict):
+                        attachments = msg_data.get("attachment_names", [])
+                    
+                    logger.info(f"   ✅ 计入排队：user={task_username}, attachments={len(attachments)}, time={task.get('create_time')}")
                     queue_position += len(attachments)
                 else:
-                    logger.info(f"   ⏭️  跳过当前用户：user={task_username}, attachments={len(attachments)}")
+                    logger.info(f"   ⏭️  跳过当前用户：user={task_username}")
             
-            logger.info(f"📊 Calculated queue_position for {username}: {queue_position} (total attachments from other users)")
+            logger.info(f"📊 Calculated queue_position for {username}: {queue_position}")
         
         return {
             "total_pending": total_pending,
