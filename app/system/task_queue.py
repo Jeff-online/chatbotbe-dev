@@ -232,8 +232,10 @@ class QueueState(GlobalResource):
                 "queue_name": queue_name,
                 "message": message,
                 "status": status,
-                "create_time": datetime.now().isoformat()
+                "create_time": datetime.now(timezone.utc).isoformat()
             }
+            if status == "queued":
+                item["queued_time"] = datetime.now(timezone.utc).isoformat()
             if session_id:
                 item["session_id"] = session_id
             
@@ -260,7 +262,9 @@ class QueueState(GlobalResource):
         try:
             item = current_app.container_task_queue.read_item(item=doc_id, partition_key=doc_id)
             item["status"] = status
-            item["update_time"] = datetime.now().isoformat()
+            item["update_time"] = datetime.now(timezone.utc).isoformat()
+            if status == "queued" and "queued_time" not in item:
+                item["queued_time"] = datetime.now(timezone.utc).isoformat()
             current_app.container_task_queue.upsert_item(item)
             logger.info(f"✅ Updated queue state to '{status}' for record id: {doc_id}")
         except Exception as e:
@@ -305,7 +309,9 @@ class QueueState(GlobalResource):
         items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
         for item in items:
             item["status"] = status
-            item["update_time"] = datetime.now().isoformat()
+            item["update_time"] = datetime.now(timezone.utc).isoformat()
+            if status == "queued" and "queued_time" not in item:
+                item["queued_time"] = datetime.now(timezone.utc).isoformat()
             current_app.container_task_queue.upsert_item(item)
         logger.info(f"✅ Updated queue state to '{status}' for message_id: {message_id}")
 
@@ -333,7 +339,7 @@ class QueueState(GlobalResource):
                 attachments = message_data.get("attachment_names", [])
                 if filename in attachments:
                     item["status"] = status
-                    item["update_time"] = datetime.now().isoformat()
+                    item["update_time"] = datetime.now(timezone.utc).isoformat()
                     current_app.container_task_queue.upsert_item(item)
                     logger.info(f"✅ Updated queue state to '{status}' for file: {filename}")
         except Exception as e:
@@ -502,7 +508,7 @@ class QueueStats(GlobalResource):
             
             # 1. 查询所有活跃任务
             # 扩大时间范围到 48 小时，确保不会漏掉跨天任务
-            active_window = (datetime.now() - timedelta(hours=48)).isoformat()
+            active_window = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
             query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed') AND c.create_time > @window"
             params_active = [{"name": "@window", "value": active_window}]
             
@@ -535,23 +541,31 @@ class QueueStats(GlobalResource):
             
             # 3. 统计逻辑
             total_pending = 0
+            total_uploaded = 0
             light_queue_pending = 0
             heavy_queue_pending = 0
             light_attachment_names = []
             heavy_attachment_names = []
-            user_earliest_time = None
+            user_earliest_queued_time = None
             
             for item in all_active_items:
                 task_username = item.get("username")
                 if task_username == username:
-                    total_pending += 1
-                    create_time_str = item.get("create_time")
-                    if create_time_str:
-                        try:
-                            t = datetime.fromisoformat(create_time_str)
-                            if user_earliest_time is None or t < user_earliest_time:
-                                user_earliest_time = t
-                        except: pass
+                    status = item.get("status")
+                    # 统计所有活跃任务（包含已上传和正在处理的任务）
+                    if status in ['uploaded', 'queued', 'processing']:
+                        total_pending += 1
+                        
+                        if status in ['queued', 'processing']:
+                            queued_time_str = item.get("queued_time")
+                            if queued_time_str:
+                                try:
+                                    t = datetime.fromisoformat(queued_time_str)
+                                    if user_earliest_queued_time is None or t < user_earliest_queued_time:
+                                        user_earliest_queued_time = t
+                                except: pass
+                        elif status == 'uploaded':
+                            total_uploaded += 1
                     
                     q_name = item.get("queue_name", "")
                     msg_data = item.get("message", {})
@@ -569,20 +583,39 @@ class QueueStats(GlobalResource):
             
             # 4. 计算排队位置
             queue_position = 0
-            if user_earliest_time:
+            # 确定比较基准时间：如果有已提交任务，取最早的 queued_time；
+            # 如果只有已上传未提交任务，则以当前时间为准，查看当前有多少任务在排队
+            base_time = user_earliest_queued_time
+            if base_time is None and total_uploaded > 0:
+                base_time = datetime.now(timezone.utc).isoformat()
+            
+            if base_time:
                 for task in all_active_items:
-                    if task.get("username") != username:
-                        task_time_str = task.get("create_time")
-                        if task_time_str:
-                            try:
-                                if datetime.fromisoformat(task_time_str) < user_earliest_time:
-                                    msg_data = task.get("message", {})
-                                    if isinstance(msg_data, str):
-                                        try: msg_data = json.loads(msg_data)
-                                        except: pass
-                                    attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
-                                    queue_position += len(attachments)
-                            except: pass
+                    # 只有处于排队或处理中的任务才算在排队位置中
+                    if task.get("status") in ['queued', 'processing']:
+                        if task.get("username") != username:
+                            task_queued_time_str = task.get("queued_time")
+                            if task_queued_time_str:
+                                try:
+                                    t_task = datetime.fromisoformat(task_queued_time_str)
+                                    # 确保 t_task 有时区信息
+                                    if t_task.tzinfo is None:
+                                        t_task = t_task.replace(tzinfo=timezone.utc)
+                                        
+                                    t_base = base_time
+                                    if isinstance(t_base, str):
+                                        t_base = datetime.fromisoformat(t_base)
+                                    if t_base.tzinfo is None:
+                                        t_base = t_base.replace(tzinfo=timezone.utc)
+                                        
+                                    if t_task < t_base:
+                                        msg_data = task.get("message", {})
+                                        if isinstance(msg_data, str):
+                                            try: msg_data = json.loads(msg_data)
+                                            except: pass
+                                        attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
+                                        queue_position += len(attachments)
+                                except: pass
             
             # 统计已解析附件名
             parsed_attachment_names = []
@@ -594,10 +627,11 @@ class QueueStats(GlobalResource):
                 attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
                 if attachments: parsed_attachment_names.extend(attachments)
             
-            logger.info(f"📊 QueueStats for {username}: pending={total_pending}, position={queue_position}, parsed={len(items_parsed)}")
+            logger.info(f"📊 QueueStats for {username}: pending={total_pending}, uploaded={total_uploaded}, position={queue_position}, parsed={len(items_parsed)}")
             
             return {
                 "total_pending": total_pending,
+                "total_uploaded": total_uploaded,
                 "light_queue_pending": light_queue_pending,
                 "heavy_queue_pending": heavy_queue_pending,
                 "light_attachment_names": light_attachment_names,
@@ -658,7 +692,7 @@ class TaskQueue(GlobalResource):
         elif not queue_name:
             queue_name = "light-queue"
 
-        create_time = datetime.now().isoformat()
+        create_time = datetime.now(timezone.utc).isoformat()
         status = "queued"
 
         # Construct message payload
@@ -829,7 +863,7 @@ class TaskQueue(GlobalResource):
                     "user-name": username,
                     "queue_name": queue_name,
                     "status": "updated",
-                    "create_time": datetime.now().isoformat(),
+                    "create_time": datetime.now(timezone.utc).isoformat(),
                     "message": self._truncate_message(message_content)
                 }
                 message_json = json.dumps(message_payload)
@@ -1016,7 +1050,8 @@ class SubmitQueuedTasks(GlobalResource):
                     try:
                         # 更新记录状态为 'queued'
                         item['status'] = 'queued'
-                        item['update_time'] = datetime.now().isoformat()
+                        item['update_time'] = datetime.now(timezone.utc).isoformat()
+                        item['queued_time'] = datetime.now(timezone.utc).isoformat()
                         
                         # 如果有传入新的 session_id，则更新
                         if session_id:
@@ -1024,6 +1059,7 @@ class SubmitQueuedTasks(GlobalResource):
                         
                         # 更新 message 内容
                         message_data['status'] = 'queued'
+                        message_data['queued_time'] = item['queued_time']
                         message_data['message'] = message_data.get('message', '').replace('(waiting for submit)', '')
                         # 清理 message 内部的 session_id（如果有）
                         if 'session_id' in message_data:
@@ -1061,15 +1097,17 @@ class SubmitQueuedTasks(GlobalResource):
                             send_result = queue_client.send_message(final_message)
                             logger.info(f"✅ Sent to queue {queue_name}, message_id: {send_result.id}")
                             
-                            # 更新 DB 记录
-                            item['status'] = 'queued'
+                            # 更新 DB 记录，包含 message_id 和 pop_receipt
+                            item['message_id'] = send_result.id
+                            item['pop_receipt'] = send_result.pop_receipt
                             current_app.container_task_queue.upsert_item(item)
                         
                         submitted_count += 1
                         results.append({
                             'filename': file_attachments,
                             'queue_name': queue_name,
-                            'status': 'queued'
+                            'status': 'queued',
+                            'queued_time': item['queued_time']
                         })
                         
                     except Exception as submit_err:
