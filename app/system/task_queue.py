@@ -509,25 +509,27 @@ class QueueStats(GlobalResource):
             # 1. 查询所有活跃任务
             # 扩大时间范围到 48 小时，确保不会漏掉跨天任务
             active_window = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
-            query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed') AND c.create_time > @window"
-            params_active = [{"name": "@window", "value": active_window}]
+            # 移除 status 和 create_time 过滤，在内存中进行更精确的过滤
+            query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed')"
             
             all_active_items = []
             try:
                 all_active_items = list(current_app.container_task_queue.query_items(
                     query=query_all_active, 
-                    parameters=params_active,
                     enable_cross_partition_query=True
                 ))
+                logger.info(f"🔍 QueueStats: Found {len(all_active_items)} total active items in system")
             except Exception as e:
                 logger.error(f"❌ QueueStats: Error querying active items: {e}")
             
             # 2. 查询已解析完成的任务
-            query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status = 'parsed' AND c.create_time > @window"
-            params_parsed = [
-                {"name": "@username", "value": username},
-                {"name": "@window", "value": active_window}
-            ]
+            query_parsed = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status = 'parsed' AND c.create_time > @window"
+            # 只要有 username 就增加过滤
+            params_parsed = [{"name": "@window", "value": active_window}]
+            if username:
+                query_parsed += " AND (LOWER(c.username) = @username_lower OR c.username = @username)"
+                params_parsed.append({"name": "@username", "value": username})
+                params_parsed.append({"name": "@username_lower", "value": username.lower()})
             
             items_parsed = []
             try:
@@ -548,11 +550,14 @@ class QueueStats(GlobalResource):
             heavy_attachment_names = []
             user_earliest_queued_time = None
             
+            username_lower = username.lower() if username else ""
+            
             for item in all_active_items:
-                task_username = item.get("username")
-                if task_username == username:
-                    status = item.get("status")
-                    # 统计所有活跃任务（包含已上传和正在处理的任务）
+                task_username = (item.get("username") or "").lower()
+                status = item.get("status")
+                
+                if task_username == username_lower:
+                    # 统计当前用户活跃任务
                     if status in ['uploaded', 'queued', 'processing']:
                         total_pending += 1
                         
@@ -567,6 +572,7 @@ class QueueStats(GlobalResource):
                         elif status == 'uploaded':
                             total_uploaded += 1
                     
+                    # 统计当前用户附件
                     q_name = item.get("queue_name", "")
                     msg_data = item.get("message", {})
                     if isinstance(msg_data, str):
@@ -583,39 +589,49 @@ class QueueStats(GlobalResource):
             
             # 4. 计算排队位置
             queue_position = 0
-            # 确定比较基准时间：如果有已提交任务，取最早的 queued_time；
-            # 如果只有已上传未提交任务，则以当前时间为准，查看当前有多少任务在排队
+            # 确定比较基准时间
             base_time = user_earliest_queued_time
             if base_time is None and total_uploaded > 0:
-                base_time = datetime.now(timezone.utc).isoformat()
+                # 如果还没送信，则以当前时间为准，看前面有多少人在处理
+                base_time = datetime.now(timezone.utc)
             
             if base_time:
+                # 统一转为有时区的 datetime 对象
+                if isinstance(base_time, str):
+                    base_time = datetime.fromisoformat(base_time)
+                if base_time.tzinfo is None:
+                    base_time = base_time.replace(tzinfo=timezone.utc)
+                else:
+                    base_time = base_time.astimezone(timezone.utc)
+
                 for task in all_active_items:
-                    # 只有处于排队或处理中的任务才算在排队位置中
-                    if task.get("status") in ['queued', 'processing']:
-                        if task.get("username") != username:
-                            task_queued_time_str = task.get("queued_time")
-                            if task_queued_time_str:
+                    task_status = task.get("status")
+                    if task_status in ['queued', 'processing']:
+                        task_user_lower = (task.get("username") or "").lower()
+                        if task_user_lower != username_lower:
+                            # 优先使用 queued_time，如果没有则退而求其次使用 create_time
+                            task_time_str = task.get("queued_time") or task.get("create_time")
+                            if task_time_str:
                                 try:
-                                    t_task = datetime.fromisoformat(task_queued_time_str)
-                                    # 确保 t_task 有时区信息
+                                    t_task = datetime.fromisoformat(task_time_str)
                                     if t_task.tzinfo is None:
                                         t_task = t_task.replace(tzinfo=timezone.utc)
+                                    else:
+                                        t_task = t_task.astimezone(timezone.utc)
                                         
-                                    t_base = base_time
-                                    if isinstance(t_base, str):
-                                        t_base = datetime.fromisoformat(t_base)
-                                    if t_base.tzinfo is None:
-                                        t_base = t_base.replace(tzinfo=timezone.utc)
-                                        
-                                    if t_task < t_base:
+                                    # 比较逻辑：任务时间早于基准时间
+                                    if t_task < base_time:
                                         msg_data = task.get("message", {})
                                         if isinstance(msg_data, str):
                                             try: msg_data = json.loads(msg_data)
                                             except: pass
                                         attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
-                                        queue_position += len(attachments)
-                                except: pass
+                                        count = len(attachments) if attachments else 1
+                                        queue_position += count
+                                        logger.info(f"📍 QueueStats: Found {count} attachments from {task_user_lower} in front of {username_lower}")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Error comparing task times: {e}")
+                                    pass
             
             # 统计已解析附件名
             parsed_attachment_names = []
