@@ -646,6 +646,9 @@ class QueueStats(GlobalResource):
                                         except Exception as e:
                                             logger.warning(f"⚠️ Error comparing task times: {e}")
                                             pass
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Error parsing task time string: {e}")
+                                    pass
             
             # 统计已解析附件名
             parsed_attachment_names = []
