@@ -145,16 +145,17 @@ class SessionManagement(GlobalResource):
                         try:
                             # Before calling get_answer, update status to 'processing'
                             if attachment_names:
-                                for filename in (attachment_names if isinstance(attachment_names, list) else [attachment_names]):
-                                    QueueState.update_status_by_filename(username, filename, "processing")
+                                # 批量更新状态为 processing，提高效率
+                                file_list = attachment_names if isinstance(attachment_names, list) else [attachment_names]
+                                QueueState.update_statuses_by_filenames(username, file_list, "processing", session_id=session_id)
                             
                             content = clue + content
                             content, response_ai, used_model = self.get_answer(file_content, content, dialogue_history, history_data, deploy_model)
                             
                             # After AI finishes, update status to 'parsed'
                             if attachment_names:
-                                for filename in (attachment_names if isinstance(attachment_names, list) else [attachment_names]):
-                                    QueueState.update_status_by_filename(username, filename, "parsed")
+                                # 批量更新状态为 parsed
+                                QueueState.update_statuses_by_filenames(username, file_list, "parsed", session_id=session_id)
                         except Exception as e:
                             # Update to 'failed' on error
                             if attachment_names:

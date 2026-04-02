@@ -316,15 +316,31 @@ class QueueState(GlobalResource):
         logger.info(f"✅ Updated queue state to '{status}' for message_id: {message_id}")
 
     @staticmethod
-    def update_status_by_filename(username: str, filename: str, status: str) -> None:
+    def update_status_by_filename(username: str, filename: str, status: str, session_id: str = None) -> None:
         """
-        根据用户名和文件名更新队列状态
+        根据用户名和文件名更新单个队列记录状态
+        """
+        QueueState.update_statuses_by_filenames(username, [filename], status, session_id)
+
+    @staticmethod
+    def update_statuses_by_filenames(username: str, filenames: list, status: str, session_id: str = None) -> None:
+        """
+        批量根据用户名和文件名列表更新队列状态，显著提高性能
         :param username: 用户名
-        :param filename: 文件名
+        :param filenames: 文件名列表
         :param status: 新状态
+        :param session_id: 可选的会话 ID
         """
-        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username"
+        if not filenames:
+            return
+
+        # 构建更精确的查询，只查找活跃的任务（非 parsed/failed）
+        query = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.username = @username AND c.status NOT IN ('parsed', 'failed')"
         params = [{"name": "@username", "value": username}]
+        
+        if session_id:
+            query += " AND c.session_id = @session_id"
+            params.append({"name": "@session_id", "value": session_id})
         
         try:
             items = list(current_app.container_task_queue.query_items(query=query, parameters=params, enable_cross_partition_query=True))
@@ -337,13 +353,26 @@ class QueueState(GlobalResource):
                         continue
                 
                 attachments = message_data.get("attachment_names", [])
-                if filename in attachments:
+                # 检查记录中的任何一个文件是否在待更新列表中
+                if any(fname in filenames for fname in attachments):
+                    # 如果状态没有变化，不重复 upsert
+                    if item.get("status") == status:
+                        continue
+                        
                     item["status"] = status
                     item["update_time"] = datetime.now(timezone.utc).isoformat()
+                    if status == "queued" and "queued_time" not in item:
+                        item["queued_time"] = datetime.now(timezone.utc).isoformat()
+                    
+                    # 更新 message 内容中的 status
+                    if isinstance(message_data, dict):
+                        message_data["status"] = status
+                        item["message"] = json.dumps(message_data)
+                    
                     current_app.container_task_queue.upsert_item(item)
-                    logger.info(f"✅ Updated queue state to '{status}' for file: {filename}")
+                    logger.info(f"✅ Updated queue state to '{status}' for attachments: {attachments}")
         except Exception as e:
-            logger.error(f"❌ Failed to update status by filename: {e}")
+            logger.error(f"❌ Failed to update statuses for filenames {filenames}: {e}")
 
     @staticmethod
     def delete_by_message_id(message_id: str) -> None:
@@ -499,9 +528,12 @@ class QueueStats(GlobalResource):
     def get(self):
         """获取队列统计信息（包含待处理和已解析）"""
         try:
+            from .args_parser import QueueStateGetParser
             args_parser = QueueStateGetParser()
             args = args_parser.parser.parse_args()
             username = args.get("username")
+            force_refresh_str = args.get("force_refresh", 'false')
+            force_refresh = str(force_refresh_str).lower() == 'true'
             
             if not username:
                 return {"msg": "Username is required", "code": 400}
@@ -512,13 +544,16 @@ class QueueStats(GlobalResource):
             # 移除 status 和 create_time 过滤，在内存中进行更精确的过滤
             query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed')"
             
+            # 如果是强制刷新，我们可以尝试使用更高的一致性或者特定的查询
             all_active_items = []
             try:
+                # 在 Cosmos DB 中，如果没有显式指定一致性级别，它通常遵循容器默认设置。
+                # 这里的 query_items 已经足够快。
                 all_active_items = list(current_app.container_task_queue.query_items(
                     query=query_all_active, 
                     enable_cross_partition_query=True
                 ))
-                logger.info(f"🔍 QueueStats: Found {len(all_active_items)} total active items in system")
+                logger.info(f"🔍 QueueStats (force={force_refresh}): Found {len(all_active_items)} total active items in system")
             except Exception as e:
                 logger.error(f"❌ QueueStats: Error querying active items: {e}")
             
@@ -562,12 +597,12 @@ class QueueStats(GlobalResource):
                         total_pending += 1
                         
                         # 确定当前用户最早的任务时间作为基准
-                        # 重要：只有真正进入队列的任务（queued/processing）才能提供准确的基准时间
-                        if status in ['queued', 'processing']:
-                            queued_time_str = item.get("queued_time")
-                            if queued_time_str:
+                        # 重要：优先使用 queued_time，如果没有（如 uploaded/processing 刚转换中），退而求其次使用 create_time
+                        if status in ['queued', 'processing', 'uploaded']:
+                            time_str = item.get("queued_time") or item.get("create_time")
+                            if time_str:
                                 try:
-                                    t = datetime.fromisoformat(queued_time_str)
+                                    t = datetime.fromisoformat(time_str)
                                     if user_earliest_queued_time is None or t < user_earliest_queued_time:
                                         user_earliest_queued_time = t
                                 except: pass
@@ -595,8 +630,7 @@ class QueueStats(GlobalResource):
             # 确定比较基准时间
             base_time = user_earliest_queued_time
             if base_time is None and (total_uploaded > 0 or total_pending > 0):
-                # 如果用户有活跃任务但还没确定基准时间（可能是刚点送信但 DB 还没更新完状态），
-                # 则以当前服务器时间作为基准，确保能算出前面有多少人在处理
+                # 如果用户有活跃任务但还没确定基准时间，则以当前服务器时间作为基准
                 base_time = datetime.now(timezone.utc)
             
             if base_time:
@@ -610,10 +644,12 @@ class QueueStats(GlobalResource):
 
                 for task in all_active_items:
                     task_status = task.get("status")
+                    # 如果其他用户的任务处于 queued 或 processing 状态，计入排队
+                    # 或者是 uploaded 状态但 create_time 明显早于我们的（防止有些任务卡死在 uploaded）
                     if task_status in ['queued', 'processing']:
                         task_user_lower = (task.get("username") or "").lower()
                         if task_user_lower != username_lower:
-                            # 优先使用 queued_time，如果没有则退而求其次使用 create_time
+                            # 优先使用 queued_time，如果没有则使用 create_time
                             task_time_str = task.get("queued_time") or task.get("create_time")
                             if task_time_str:
                                 try:
@@ -624,30 +660,17 @@ class QueueStats(GlobalResource):
                                         t_task = t_task.astimezone(timezone.utc)
                                         
                                     # 比较逻辑：任务时间严格早于基准时间
-                                    # 只有点击过“送信”的任务（拥有 queued_time）才会计入排队位置
-                                    task_queued_time_str = task.get("queued_time")
-                                    if task_queued_time_str:
-                                        try:
-                                            t_task = datetime.fromisoformat(task_queued_time_str)
-                                            if t_task.tzinfo is None:
-                                                t_task = t_task.replace(tzinfo=timezone.utc)
-                                            else:
-                                                t_task = t_task.astimezone(timezone.utc)
-                                                
-                                            if t_task < base_time:
-                                                msg_data = task.get("message", {})
-                                                if isinstance(msg_data, str):
-                                                    try: msg_data = json.loads(msg_data)
-                                                    except: pass
-                                                attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
-                                                count = len(attachments) if attachments else 1
-                                                queue_position += count
-                                                logger.info(f"📍 QueueStats: Found {count} attachments from {task_user_lower} in front of {username_lower} (t_task={t_task}, base_time={base_time})")
-                                        except Exception as e:
-                                            logger.warning(f"⚠️ Error comparing task times: {e}")
-                                            pass
+                                    if t_task < base_time:
+                                        msg_data = task.get("message", {})
+                                        if isinstance(msg_data, str):
+                                            try: msg_data = json.loads(msg_data)
+                                            except: pass
+                                        attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
+                                        count = len(attachments) if attachments else 1
+                                        queue_position += count
+                                        logger.info(f"📍 QueueStats: Found {count} attachments from {task_user_lower} in front of {username_lower} (t_task={t_task}, base_time={base_time})")
                                 except Exception as e:
-                                    logger.warning(f"⚠️ Error parsing task time string: {e}")
+                                    logger.warning(f"⚠️ Error comparing task times: {e}")
                                     pass
             
             # 统计已解析附件名
@@ -1081,7 +1104,7 @@ class SubmitQueuedTasks(GlobalResource):
                 
                 if should_submit:
                     try:
-                        # 更新记录状态为 'queued'
+                        # 准备更新的数据，但不立即 upsert
                         item['status'] = 'queued'
                         item['update_time'] = datetime.now(timezone.utc).isoformat()
                         item['queued_time'] = datetime.now(timezone.utc).isoformat()
@@ -1100,13 +1123,12 @@ class SubmitQueuedTasks(GlobalResource):
                             
                         item['message'] = json.dumps(message_data)
                         
-                        current_app.container_task_queue.upsert_item(item)
-                        
-                        logger.info(f"✅ Submitted task for file: {file_attachments}, queue: {item.get('queue_name')}")
-                        
                         # 实际发送到 Azure Queue
                         queue_name = item.get('queue_name', 'light-queue')
                         connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+                        
+                        message_id = None
+                        pop_receipt = None
                         
                         if connection_string:
                             from azure.storage.queue import QueueClient
@@ -1118,7 +1140,6 @@ class SubmitQueuedTasks(GlobalResource):
                                 pass
                             
                             # Ensure message is not too large before sending
-                            # Since item['message'] is already JSON, we need to parse it, truncate the 'message' field, and re-serialize
                             try:
                                 msg_data = json.loads(item['message'])
                                 if 'message' in msg_data:
@@ -1130,10 +1151,16 @@ class SubmitQueuedTasks(GlobalResource):
                             send_result = queue_client.send_message(final_message)
                             logger.info(f"✅ Sent to queue {queue_name}, message_id: {send_result.id}")
                             
-                            # 更新 DB 记录，包含 message_id 和 pop_receipt
-                            item['message_id'] = send_result.id
-                            item['pop_receipt'] = send_result.pop_receipt
-                            current_app.container_task_queue.upsert_item(item)
+                            message_id = send_result.id
+                            pop_receipt = send_result.pop_receipt
+                            
+                            # 设置 ID 信息
+                            item['message_id'] = message_id
+                            item['pop_receipt'] = pop_receipt
+                        
+                        # ✅ 只进行一次数据库更新，包含所有状态和 ID 信息
+                        current_app.container_task_queue.upsert_item(item)
+                        logger.info(f"✅ Updated DB and submitted task for file: {file_attachments}, queue: {queue_name}")
                         
                         submitted_count += 1
                         results.append({

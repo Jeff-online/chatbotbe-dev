@@ -132,10 +132,11 @@ class TaskQueueDeleteParser(BaseArgsParser):
 class QueueStateGetParser(BaseArgsParser):
     def __init__(self):
         super().__init__()
-        self.parser.add_argument('username', type=str, location='args')
+        self.parser.add_argument('username', type=str, location='args', required=True)
         self.parser.add_argument('queue_name', type=str, location='args')
         self.parser.add_argument('message_id', type=str, location='args')
         self.parser.add_argument('status', type=str, location='args')
+        self.parser.add_argument('force_refresh', type=str, location='args', default='false')
 
 
 class QueueStatePostParser(BaseArgsParser):
