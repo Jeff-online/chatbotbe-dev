@@ -532,8 +532,6 @@ class QueueStats(GlobalResource):
             args_parser = QueueStateGetParser()
             args = args_parser.parser.parse_args()
             username = args.get("username")
-            force_refresh_str = args.get("force_refresh", 'false')
-            force_refresh = str(force_refresh_str).lower() == 'true'
             
             if not username:
                 return {"msg": "Username is required", "code": 400}
@@ -544,7 +542,6 @@ class QueueStats(GlobalResource):
             # 移除 status 和 create_time 过滤，在内存中进行更精确的过滤
             query_all_active = "SELECT * FROM c WHERE c.type = 'queue_state' AND c.status NOT IN ('parsed', 'failed')"
             
-            # 如果是强制刷新，我们可以尝试使用更高的一致性或者特定的查询
             all_active_items = []
             try:
                 # 在 Cosmos DB 中，如果没有显式指定一致性级别，它通常遵循容器默认设置。
@@ -553,7 +550,7 @@ class QueueStats(GlobalResource):
                     query=query_all_active, 
                     enable_cross_partition_query=True
                 ))
-                logger.info(f"🔍 QueueStats (force={force_refresh}): Found {len(all_active_items)} total active items in system")
+                logger.info(f"🔍 QueueStats: Found {len(all_active_items)} total active items in system")
             except Exception as e:
                 logger.error(f"❌ QueueStats: Error querying active items: {e}")
             

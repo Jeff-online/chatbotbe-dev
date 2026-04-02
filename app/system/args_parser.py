@@ -136,7 +136,6 @@ class QueueStateGetParser(BaseArgsParser):
         self.parser.add_argument('queue_name', type=str, location='args')
         self.parser.add_argument('message_id', type=str, location='args')
         self.parser.add_argument('status', type=str, location='args')
-        self.parser.add_argument('force_refresh', type=str, location='args', default='false')
 
 
 class QueueStatePostParser(BaseArgsParser):
