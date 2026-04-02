@@ -561,6 +561,8 @@ class QueueStats(GlobalResource):
                     if status in ['uploaded', 'queued', 'processing']:
                         total_pending += 1
                         
+                        # 确定当前用户最早的任务时间作为基准
+                        # 重要：只有真正进入队列的任务（queued/processing）才能提供准确的基准时间
                         if status in ['queued', 'processing']:
                             queued_time_str = item.get("queued_time")
                             if queued_time_str:
@@ -569,7 +571,8 @@ class QueueStats(GlobalResource):
                                     if user_earliest_queued_time is None or t < user_earliest_queued_time:
                                         user_earliest_queued_time = t
                                 except: pass
-                        elif status == 'uploaded':
+                        
+                        if status == 'uploaded':
                             total_uploaded += 1
                     
                     # 统计当前用户附件
@@ -591,8 +594,9 @@ class QueueStats(GlobalResource):
             queue_position = 0
             # 确定比较基准时间
             base_time = user_earliest_queued_time
-            if base_time is None and total_uploaded > 0:
-                # 如果还没送信，则以当前时间为准，看前面有多少人在处理
+            if base_time is None and (total_uploaded > 0 or total_pending > 0):
+                # 如果用户有活跃任务但还没确定基准时间（可能是刚点送信但 DB 还没更新完状态），
+                # 则以当前服务器时间作为基准，确保能算出前面有多少人在处理
                 base_time = datetime.now(timezone.utc)
             
             if base_time:
@@ -619,19 +623,29 @@ class QueueStats(GlobalResource):
                                     else:
                                         t_task = t_task.astimezone(timezone.utc)
                                         
-                                    # 比较逻辑：任务时间早于基准时间
-                                    if t_task < base_time:
-                                        msg_data = task.get("message", {})
-                                        if isinstance(msg_data, str):
-                                            try: msg_data = json.loads(msg_data)
-                                            except: pass
-                                        attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
-                                        count = len(attachments) if attachments else 1
-                                        queue_position += count
-                                        logger.info(f"📍 QueueStats: Found {count} attachments from {task_user_lower} in front of {username_lower}")
-                                except Exception as e:
-                                    logger.warning(f"⚠️ Error comparing task times: {e}")
-                                    pass
+                                    # 比较逻辑：任务时间严格早于基准时间
+                                    # 只有点击过“送信”的任务（拥有 queued_time）才会计入排队位置
+                                    task_queued_time_str = task.get("queued_time")
+                                    if task_queued_time_str:
+                                        try:
+                                            t_task = datetime.fromisoformat(task_queued_time_str)
+                                            if t_task.tzinfo is None:
+                                                t_task = t_task.replace(tzinfo=timezone.utc)
+                                            else:
+                                                t_task = t_task.astimezone(timezone.utc)
+                                                
+                                            if t_task < base_time:
+                                                msg_data = task.get("message", {})
+                                                if isinstance(msg_data, str):
+                                                    try: msg_data = json.loads(msg_data)
+                                                    except: pass
+                                                attachments = msg_data.get("attachment_names", []) if isinstance(msg_data, dict) else []
+                                                count = len(attachments) if attachments else 1
+                                                queue_position += count
+                                                logger.info(f"📍 QueueStats: Found {count} attachments from {task_user_lower} in front of {username_lower} (t_task={t_task}, base_time={base_time})")
+                                        except Exception as e:
+                                            logger.warning(f"⚠️ Error comparing task times: {e}")
+                                            pass
             
             # 统计已解析附件名
             parsed_attachment_names = []
