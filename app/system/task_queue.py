@@ -594,12 +594,20 @@ class QueueStats(GlobalResource):
                         total_pending += 1
                         
                         # 确定当前用户最早的任务时间作为基准
-                        # 重要：优先使用 queued_time，如果没有（如 uploaded/processing 刚转换中），退而求其次使用 create_time
-                        if status in ['queued', 'processing', 'uploaded']:
+                        # 重要：只有处于 queued 或 processing 状态的任务才有确定的排队时间
+                        # 如果是 uploaded 状态，它还没有进入真正的队列，不应该用它的 create_time 来提前排队位置
+                        if status in ['queued', 'processing']:
+                            # 重要：优先使用 queued_time，它是进入队列的时间
                             time_str = item.get("queued_time") or item.get("create_time")
                             if time_str:
                                 try:
                                     t = datetime.fromisoformat(time_str)
+                                    # 如果没有时区信息，假设为 UTC
+                                    if t.tzinfo is None:
+                                        t = t.replace(tzinfo=timezone.utc)
+                                    else:
+                                        t = t.astimezone(timezone.utc)
+                                        
                                     if user_earliest_queued_time is None or t < user_earliest_queued_time:
                                         user_earliest_queued_time = t
                                 except: pass
@@ -1341,4 +1349,3 @@ def default_task_processor(username: str, attachment_names: list, message_data: 
         "username": username,
         "processed_files": attachment_names
     }
-
