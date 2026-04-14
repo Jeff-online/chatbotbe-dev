@@ -54,56 +54,13 @@ class FileOperation:
             for i, page in enumerate(pdf.pages):
                 if chars_count >= max_chars:
                     break
-                    
-                # 提取表格，pdfplumber 的表格识别在复杂 PDF 中可能非常耗时
-                table = None
+
+                # 直接提取页面文本，避免复杂表格识别导致的超时
                 try:
-                    table = page.extract_table()
+                    text = page.extract_text()
                 except Exception:
-                    table = None
+                    text = ""
 
-                if (table and 
-                    isinstance(table, list) and 
-                    len(table) > 0 and
-                    all(isinstance(row, list) for row in table)):
-                    
-                    has_content = any(any(cell for cell in row if cell) for row in table)
-                    if has_content:
-                        tables.append(table)
-                        
-                        # 获取表格边界框，若识别失败则忽略表格边界
-                        try:
-                            table_bboxes = [pos.bbox for pos in page.find_tables()]
-                        except Exception:
-                            table_bboxes = []
-
-                        try:
-                            filtered_text = page.extract_words()
-                        except Exception:
-                            filtered_text = []
-                        
-                        # 过滤掉表格中的文字
-                        for word in filtered_text:
-                            x0, y0, x1, y1 = word["x0"], word["top"], word["x1"], word["bottom"]
-                            inside_table = any(
-                                t_x0 <= x0 <= t_x1 and t_y0 <= y0 <= t_y1
-                                for (t_x0, t_y0, t_x1, t_y1) in table_bboxes
-                            ) if table_bboxes else False
-                            if not inside_table:
-                                word_text = word["text"]
-                                if chars_count + len(word_text) <= max_chars:
-                                    final_text.append(word_text)
-                                    chars_count += len(word_text)
-                                else:
-                                    remaining = max_chars - chars_count
-                                    if remaining > 0:
-                                        final_text.append(word_text[:remaining])
-                                        chars_count = max_chars
-                                    break
-                        continue
-
-                # 提取页面文本（当表格为空、识别异常或不需要处理表格时）
-                text = page.extract_text()
                 if text and len(text) > 10:
                     remaining = max_chars - chars_count
                     if len(text) <= remaining:
