@@ -209,72 +209,129 @@ class SessionManagement(GlobalResource):
             raise messages.SessionIdNotExistsError
         raise messages.UserNotExistsError
 
-    @staticmethod
+	@staticmethod
     def get_answer(file_content: dict, input_data: str, question: list, history=None, deploy_model=None):
-        """
-        file_content: dict {filename: {"text": str, "images": [base64,...]}, ...}
-        """
+        import time
+        import os
+        import logging
+        from flask import current_app
+        logger = logging.getLogger(__name__)
 
         if history:
             for data in history:
                 history_message = {"role": "user", "content": data[0]}
                 question.append(history_message)
 
-        # 拼接多个文件内容
+        # 1. 提取文本与图片
         merged_texts = []
         merged_images = []
         if file_content:
             for fname, fdata in file_content.items():
-                if fdata["text"]:
+                if fdata.get("text"):
                     merged_texts.append(f"[{fname}]\n{fdata['text']}")
-                if fdata["images"]:
+                if fdata.get("images"):
                     merged_images.extend(fdata["images"])
 
-        # 整合文本
-        if merged_texts:
-            input_data = "\n\n".join(merged_texts) + "\n\n" + input_data
+        full_text = "\n\n".join(merged_texts) if merged_texts else ""
 
-        # 构造 message
-        if merged_images:
-            message = {"role": "user", "content": [{"type": "text", "text": input_data}]}
-            for base64_img in merged_images:
-                message["content"].append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{base64_img}"}
-                })
-        else:
-            message = {"role": "user", "content": input_data}
-
-        question.append(message)
-
-        # token refresh
+        # 2. Token 刷新与配置
         if time.time() >= current_app.token_expires - 600:
             new_token = current_app.credential.get_token(os.getenv("SCOPE"))
             current_app.openai_token = new_token.token
             current_app.token_expires = new_token.expires_on
+        
         current_app.openai.api_key = current_app.openai_token
-        model_key = (deploy_model or current_app.default_model or "gpt-5").lower()
-        config = current_app.model_configs.get(model_key) or current_app.model_configs.get("gpt-5")
+        model_key = (deploy_model or current_app.default_model or "gpt-5.2").lower()
+        config = current_app.model_configs.get(model_key) or current_app.model_configs.get("gpt-5.2")
         current_app.openai.api_base = config["endpoint"]
         current_app.openai.api_version = config["api_version"]
-        if model_key == "gpt-4o":
-            response = current_app.openai.ChatCompletion.create(
-                deployment_id=config["deployment"],
-                messages=question,
-                max_tokens=4000,
-                temperature=0,
-                seed=42
-            )
+
+        CHUNK_SIZE = 40000 
+
+        # 场景 A：文件较小，单次请求即可搞定
+        if len(full_text) <= CHUNK_SIZE:
+            print("小文件执行")
+            final_input = full_text + "\n\n" + input_data if full_text else input_data
+            
+            message = {"role": "user", "content": [{"type": "text", "text": final_input}]}
+            if merged_images:
+                for base64_img in merged_images:
+                    message["content"].append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_img}"}
+                    })
+
+            question.append(message)
+
+            try:
+                kwargs = {
+                    "deployment_id": config["deployment"],
+                    "messages": question,
+                    "temperature": 0,
+                    "seed": 42
+                }
+                if model_key == "gpt-4o":
+                    kwargs["max_tokens"] = 8000
+                else:
+                    kwargs["max_completion_tokens"] = 8000
+
+                response = current_app.openai.ChatCompletion.create(**kwargs)
+                answer = response['choices'][0]['message']['content'].strip()
+                return input_data, answer, model_key
+            except Exception as e:
+                logger.error(f"Single chunk processing failed: {str(e)}")
+                raise Exception(f"AI Call failed: {str(e)}")
+
+        # 场景 B：大文件切片循环（安全单线程模式）
         else:
-            response = current_app.openai.ChatCompletion.create(
-                deployment_id=config["deployment"],
-                messages=question,
-                max_completion_tokens=4000,
-                temperature=0,
-                seed=42
-            )
-        answer = response['choices'][0]['message']['content'].strip()
-        return input_data, answer, model_key
+            print("大文件执行")
+            chunks = [full_text[i:i + CHUNK_SIZE] for i in range(0, len(full_text), CHUNK_SIZE)]
+            final_answer = ""
+            
+            MAX_CHUNKS = 5
+            processed_chunks = chunks[:MAX_CHUNKS]
+
+            for idx, chunk in enumerate(processed_chunks):
+                current_question = list(question) 
+                chunk_context = f"[文件内容第 {idx+1}/{len(processed_chunks)} 部分]:\n{chunk}\n\n[用户指令]:\n{input_data}"
+                
+                msg = {"role": "user", "content": [{"type": "text", "text": chunk_context}]}
+                # 只在第一段附加图片，省 Token
+                if merged_images and idx == 0:
+                    for base64_img in merged_images:
+                        msg["content"].append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{base64_img}"}
+                        })
+                
+                current_question.append(msg)
+                
+                try:
+                    kwargs = {
+                        "deployment_id": config["deployment"],
+                        "messages": current_question,
+                        "temperature": 0,
+                        "seed": 42
+                    }
+                    if model_key == "gpt-4o":
+                        kwargs["max_tokens"] = 8000
+                    else:
+                        kwargs["max_completion_tokens"] = 8000
+
+                    response = current_app.openai.ChatCompletion.create(**kwargs)
+                    chunk_answer = response['choices'][0]['message']['content'].strip()
+                    final_answer += f"### 第 {idx+1} 部分结果 ###\n{chunk_answer}\n\n"
+                    
+                except Exception as e:
+                    logger.error(f"Chunk {idx+1} failed: {str(e)}")
+                    final_answer += f"### 第 {idx+1} 部分失败 ###\n错误: {str(e)}\n\n"
+            
+            # 如果文件真的太大，被截断了
+            if len(chunks) > MAX_CHUNKS:
+                final_answer += f"\n\n> **系统提示**: 该文件体积过于庞大。为避免处理超时，系统仅为您分析了前 {MAX_CHUNKS} 部分的内容。"
+
+            return_input = f"[系统拆分为 {len(processed_chunks)} 段处理的大型文件]\n" + input_data
+            return return_input, final_answer.strip(), model_key
 
     @staticmethod
     def check_session(session_data):
