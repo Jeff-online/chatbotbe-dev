@@ -209,7 +209,7 @@ class SessionManagement(GlobalResource):
             raise messages.SessionIdNotExistsError
         raise messages.UserNotExistsError
 
-	@staticmethod
+    @staticmethod
     def get_answer(file_content: dict, input_data: str, question: list, history=None, deploy_model=None):
         import time
         import os
