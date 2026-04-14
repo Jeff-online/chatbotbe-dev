@@ -31,7 +31,6 @@ class FileOperation:
 
         return base64_img
 
-    @staticmethod
     def extract_text_from_pdf(self, stream):
         """
         使用 PyMuPDF (fitz) 安全地从PDF流中提取文本，避免内存溢出
