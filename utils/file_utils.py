@@ -31,47 +31,118 @@ class FileOperation:
 
         return base64_img
 
-    @staticmethod
-    def extract_text_from_pdf(pdf_path):
-        pdf_bytes = io.BytesIO(pdf_path)
+    def extract_text_from_pdf(self, stream):
+        # 统一确保传入 pdfplumber 的是可 seek 的 file-like 对象
+        if not hasattr(stream, 'read'):
+            stream = io.BytesIO(stream)
+        elif not hasattr(stream, 'seek'):
+            stream = io.BytesIO(stream.read())
+        else:
+            stream.seek(0)
+
         is_content = []
         final_text = []
         tables = []
         df = ""
-        with pdfplumber.open(pdf_bytes) as pdf:
-            for page in pdf.pages:
+        chars_count = 0
+        max_chars = 100000  # 限制总字符数防止内存溢出
+        
+        # 使用上下文管理器确保资源释放
+        with pdfplumber.open(stream) as pdf:
+            for i, page in enumerate(pdf.pages):
+                if chars_count >= max_chars:
+                    break
+                    
+                # 提取表格
                 table = page.extract_table()
-                if table and any(any(once) for once in table):
-                    tables.append(table)
-                    table_bboxes = [pos.bbox for pos in page.find_tables()]
-                    filtered_text = page.extract_words()
-                    for word in filtered_text:
-                        x0, y0, x1, y1 = word["x0"], word["top"], word["x1"], word["bottom"]
-                        inside_table = any(
-                            t_x0 <= x0 <= t_x1 and t_y0 <= y0 <= t_y1
-                            for (t_x0, t_y0, t_x1, t_y1) in table_bboxes
-                        )
-                        if not inside_table:
-                            final_text.append(word["text"])
+                # 修复：添加更安全的表格验证
+                if (table and 
+                    isinstance(table, list) and 
+                    len(table) > 0 and
+                    all(isinstance(row, list) for row in table)):  # 确保所有行都是列表
+                    
+                    # 检查表格是否有实际内容
+                    has_content = False
+                    for row in table:
+                        if any(cell for cell in row if cell):  # 检查行中是否有非空单元格
+                            has_content = True
+                            break
+                    
+                    if has_content:
+                        tables.append(table)
+                        
+                        # 获取表格边界框
+                        table_bboxes = [pos.bbox for pos in page.find_tables()]
+                        filtered_text = page.extract_words()
+                        
+                        # 过滤掉表格中的文字
+                        for word in filtered_text:
+                            x0, y0, x1, y1 = word["x0"], word["top"], word["x1"], word["bottom"]
+                            inside_table = any(
+                                t_x0 <= x0 <= t_x1 and t_y0 <= y0 <= t_y1
+                                for (t_x0, t_y0, t_x1, t_y1) in table_bboxes
+                            )
+                            if not inside_table:
+                                word_text = word["text"]
+                                if chars_count + len(word_text) <= max_chars:
+                                    final_text.append(word_text)
+                                    chars_count += len(word_text)
+                                else:
+                                    # 截断超出部分
+                                    remaining = max_chars - chars_count
+                                    if remaining > 0:
+                                        final_text.append(word_text[:remaining])
+                                        chars_count = max_chars
+                                    break
+                    else:
+                        # 提取页面文本
+                        text = page.extract_text()
+                        if text and len(text) > 10:
+                            remaining = max_chars - chars_count
+                            if len(text) <= remaining:
+                                final_text.append(text)
+                                chars_count += len(text)
+                            else:
+                                final_text.append(text[:remaining])
+                                chars_count = max_chars
+                                break
+                        else:
+                            is_content.append(i)  # 注意这里用i而不是page.page_number-1
                 else:
+                    # 提取页面文本（当表格为空或格式异常时）
                     text = page.extract_text()
                     if text and len(text) > 10:
-                        final_text.append(text)
+                        remaining = max_chars - chars_count
+                        if len(text) <= remaining:
+                            final_text.append(text)
+                            chars_count += len(text)
+                        else:
+                            final_text.append(text[:remaining])
+                            chars_count = max_chars
+                            break
                     else:
-                        is_content.append(page.page_number - 1)
-
-            if tables:
-                try:
-                    df = "\n".join(pd.DataFrame(table[1:], columns=table[0]).to_json(force_ascii=False) for table in tables)
-                except:
-                    df = json.dumps(tables)
-
-            if final_text:
-                final_text = " ".join(final_text) + "\n"
-            else:
-                final_text = ""
-
-        return final_text + df, is_content
+                        is_content.append(i)  # 注意这里用i而不是page.page_number-1
+        
+        # 只处理前几个重要表格避免内存过大
+        if tables:
+            try:
+                processed_tables = []
+                for table in tables[:5]:  # 只处理前5个表格
+                    if len(table) > 0:
+                        df_obj = pd.DataFrame(table[1:], columns=table[0]) if len(table) > 1 else pd.DataFrame([table[0]])
+                        processed_tables.append(df_obj.to_json(force_ascii=False))
+                df = "\n".join(processed_tables)
+            except Exception as e:
+                # 如果pandas处理失败，使用json
+                df = json.dumps(tables[:5], ensure_ascii=False)
+        
+        # 最终文本拼接
+        if final_text:
+            final_text_str = " ".join(final_text) + "\n"
+        else:
+            final_text_str = ""
+        
+        return final_text_str + df, is_content
 
     @staticmethod
     def extract_text_from_word(docx_path):
