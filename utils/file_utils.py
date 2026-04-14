@@ -32,14 +32,16 @@ class FileOperation:
         return base64_img
 
     def extract_text_from_pdf(self, stream):
-        # 统一确保传入 pdfplumber 的是可 seek 的 file-like 对象
-        if not hasattr(stream, 'read'):
+        # 检查是否为bytes对象，如果是则转换为BytesIO对象
+        if isinstance(stream, bytes):
             stream = io.BytesIO(stream)
-        elif not hasattr(stream, 'seek'):
-            stream = io.BytesIO(stream.read())
-        else:
-            stream.seek(0)
-
+        elif hasattr(stream, 'read'):  # 已经是文件对象
+            if hasattr(stream, 'seek'):
+                stream.seek(0)
+            else:  # 如果是不可seek的对象，转换为BytesIO
+                content = stream.read()
+                stream = io.BytesIO(content)
+        
         is_content = []
         final_text = []
         tables = []
@@ -53,27 +55,32 @@ class FileOperation:
                 if chars_count >= max_chars:
                     break
                     
-                # 提取表格
-                table = page.extract_table()
-                # 修复：添加更安全的表格验证
+                # 提取表格，pdfplumber 的表格识别在复杂 PDF 中可能非常耗时
+                table = None
+                try:
+                    table = page.extract_table()
+                except Exception:
+                    table = None
+
                 if (table and 
                     isinstance(table, list) and 
                     len(table) > 0 and
-                    all(isinstance(row, list) for row in table)):  # 确保所有行都是列表
+                    all(isinstance(row, list) for row in table)):
                     
-                    # 检查表格是否有实际内容
-                    has_content = False
-                    for row in table:
-                        if any(cell for cell in row if cell):  # 检查行中是否有非空单元格
-                            has_content = True
-                            break
-                    
+                    has_content = any(any(cell for cell in row if cell) for row in table)
                     if has_content:
                         tables.append(table)
                         
-                        # 获取表格边界框
-                        table_bboxes = [pos.bbox for pos in page.find_tables()]
-                        filtered_text = page.extract_words()
+                        # 获取表格边界框，若识别失败则忽略表格边界
+                        try:
+                            table_bboxes = [pos.bbox for pos in page.find_tables()]
+                        except Exception:
+                            table_bboxes = []
+
+                        try:
+                            filtered_text = page.extract_words()
+                        except Exception:
+                            filtered_text = []
                         
                         # 过滤掉表格中的文字
                         for word in filtered_text:
@@ -81,47 +88,33 @@ class FileOperation:
                             inside_table = any(
                                 t_x0 <= x0 <= t_x1 and t_y0 <= y0 <= t_y1
                                 for (t_x0, t_y0, t_x1, t_y1) in table_bboxes
-                            )
+                            ) if table_bboxes else False
                             if not inside_table:
                                 word_text = word["text"]
                                 if chars_count + len(word_text) <= max_chars:
                                     final_text.append(word_text)
                                     chars_count += len(word_text)
                                 else:
-                                    # 截断超出部分
                                     remaining = max_chars - chars_count
                                     if remaining > 0:
                                         final_text.append(word_text[:remaining])
                                         chars_count = max_chars
                                     break
+                        continue
+
+                # 提取页面文本（当表格为空、识别异常或不需要处理表格时）
+                text = page.extract_text()
+                if text and len(text) > 10:
+                    remaining = max_chars - chars_count
+                    if len(text) <= remaining:
+                        final_text.append(text)
+                        chars_count += len(text)
                     else:
-                        # 提取页面文本
-                        text = page.extract_text()
-                        if text and len(text) > 10:
-                            remaining = max_chars - chars_count
-                            if len(text) <= remaining:
-                                final_text.append(text)
-                                chars_count += len(text)
-                            else:
-                                final_text.append(text[:remaining])
-                                chars_count = max_chars
-                                break
-                        else:
-                            is_content.append(i)  # 注意这里用i而不是page.page_number-1
+                        final_text.append(text[:remaining])
+                        chars_count = max_chars
+                        break
                 else:
-                    # 提取页面文本（当表格为空或格式异常时）
-                    text = page.extract_text()
-                    if text and len(text) > 10:
-                        remaining = max_chars - chars_count
-                        if len(text) <= remaining:
-                            final_text.append(text)
-                            chars_count += len(text)
-                        else:
-                            final_text.append(text[:remaining])
-                            chars_count = max_chars
-                            break
-                    else:
-                        is_content.append(i)  # 注意这里用i而不是page.page_number-1
+                    is_content.append(i)  # 注意这里用i而不是page.page_number-1
         
         # 只处理前几个重要表格避免内存过大
         if tables:
