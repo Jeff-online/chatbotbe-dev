@@ -211,11 +211,9 @@ class SessionManagement(GlobalResource):
 
     @staticmethod
     def get_answer(file_content: dict, input_data: str, question: list, history=None, deploy_model=None):
-        import time
-        import os
-        import logging
-        from flask import current_app
-        logger = logging.getLogger(__name__)
+        """
+        file_content: dict {filename: {"text": str, "images": [base64,...]}, ...}
+        """
 
         if history:
             for data in history:
