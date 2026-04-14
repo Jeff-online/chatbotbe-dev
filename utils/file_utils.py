@@ -32,10 +32,7 @@ class FileOperation:
         return base64_img
 
     def extract_text_from_pdf(self, stream):
-        """
-        使用 PyMuPDF (fitz) 安全地从PDF流中提取文本，避免内存溢出
-        """
-        
+
         try:
             # 使用内存流打开PDF
             doc = fitz.open(stream=stream, filetype="pdf")
@@ -43,29 +40,34 @@ class FileOperation:
             total_text = ""
             pages_processed = 0
             
+            # 获取总页数的安全方式
+            page_count = doc.page_count if hasattr(doc, 'page_count') else len(doc)
             # 限制处理页数以控制内存使用
-            pages_to_process = min(len(doc), 20)  # 最多处理15页
+            pages_to_process = min(page_count, 20)  # 最多处理20页
             
             for page_num in range(pages_to_process):
-                page = doc.load_page(page_num)
-                
-                # 提取文本
-                text = page.get_text()
-                
-                # 限制单页文本长度
-                if len(text) > 8000:  # 单页最多8KB
-                    text = text[:8000]
-                
-                # 添加页面内容
-                total_text += f"\n--- Page {page_num + 1} ---\n{text}"
-                
-                pages_processed += 1
-                
-                # 检查总体文本长度，防止过大
-                if len(total_text) > 80000:  # 总体最大80KB
-                    total_text = total_text[:80000]
-                    total_text += "\n\n[文档因过大被截断...]"
-                    break
+                try:
+                    page = doc.load_page(page_num)
+                    
+                    # 提取文本
+                    text = page.get_text()
+                    
+                    # 限制单页文本长度
+                    if len(text) > 8000:  # 单页最多8KB
+                        text = text[:8000]
+                    
+                    # 添加页面内容
+                    total_text += f"\n--- Page {page_num + 1} ---\n{text}"
+                    
+                    pages_processed += 1
+                    
+                    # 检查总体文本长度，防止过大
+                    if len(total_text) > 80000:  # 总体最大80KB
+                        total_text = total_text[:80000]
+                        total_text += "\n\n[文档因过大被截断...]"
+                        break
+                except:
+                    continue
             
             doc.close()
             
