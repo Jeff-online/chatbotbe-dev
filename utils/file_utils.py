@@ -44,47 +44,60 @@ class FileOperation:
         
         is_content = []
         final_text = []
-        tables = []
         df = ""
         chars_count = 0
         max_chars = 100000  # 限制总字符数防止内存溢出
-        
-        # 使用上下文管理器确保资源释放
-        with pdfplumber.open(stream) as pdf:
-            for i, page in enumerate(pdf.pages):
-                if chars_count >= max_chars:
-                    break
 
-                # 直接提取页面文本，避免复杂表格识别导致的超时
-                try:
-                    text = page.extract_text()
-                except Exception:
-                    text = ""
-
-                if text and len(text) > 10:
-                    remaining = max_chars - chars_count
-                    if len(text) <= remaining:
-                        final_text.append(text)
-                        chars_count += len(text)
-                    else:
-                        final_text.append(text[:remaining])
-                        chars_count = max_chars
+        try:
+            with fitz.open(stream=stream, filetype="pdf") as doc:
+                for i in range(len(doc)):
+                    if chars_count >= max_chars:
                         break
-                else:
-                    is_content.append(i)  # 注意这里用i而不是page.page_number-1
-        
-        # 只处理前几个重要表格避免内存过大
-        if tables:
+
+                    try:
+                        text = doc[i].get_text("text")
+                    except Exception:
+                        text = ""
+
+                    if text and len(text.strip()) > 10:
+                        text = text.strip()
+                        remaining = max_chars - chars_count
+                        if len(text) <= remaining:
+                            final_text.append(text)
+                            chars_count += len(text)
+                        else:
+                            final_text.append(text[:remaining])
+                            chars_count = max_chars
+                            break
+                    else:
+                        is_content.append(i)
+        except Exception:
+            # fitz 解析失败时回退到 pdfplumber，但这里只做最小文本提取
+            if hasattr(stream, 'seek'):
+                stream.seek(0)
             try:
-                processed_tables = []
-                for table in tables[:5]:  # 只处理前5个表格
-                    if len(table) > 0:
-                        df_obj = pd.DataFrame(table[1:], columns=table[0]) if len(table) > 1 else pd.DataFrame([table[0]])
-                        processed_tables.append(df_obj.to_json(force_ascii=False))
-                df = "\n".join(processed_tables)
-            except Exception as e:
-                # 如果pandas处理失败，使用json
-                df = json.dumps(tables[:5], ensure_ascii=False)
+                with pdfplumber.open(stream) as pdf:
+                    for i, page in enumerate(pdf.pages):
+                        if chars_count >= max_chars:
+                            break
+                        try:
+                            text = page.extract_text()
+                        except Exception:
+                            text = ""
+
+                        if text and len(text) > 10:
+                            remaining = max_chars - chars_count
+                            if len(text) <= remaining:
+                                final_text.append(text)
+                                chars_count += len(text)
+                            else:
+                                final_text.append(text[:remaining])
+                                chars_count = max_chars
+                                break
+                        else:
+                            is_content.append(i)
+            except Exception:
+                return "", []
         
         # 最终文本拼接
         if final_text:
