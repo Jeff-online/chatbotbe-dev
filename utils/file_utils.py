@@ -32,46 +32,48 @@ class FileOperation:
         return base64_img
 
     @staticmethod
-    def extract_text_from_pdf(pdf_path):
-        pdf_bytes = io.BytesIO(pdf_path)
-        is_content = []
-        final_text = []
-        tables = []
-        df = ""
-        with pdfplumber.open(pdf_bytes) as pdf:
-            for page in pdf.pages:
-                table = page.extract_table()
-                if table and any(any(once) for once in table):
-                    tables.append(table)
-                    table_bboxes = [pos.bbox for pos in page.find_tables()]
-                    filtered_text = page.extract_words()
-                    for word in filtered_text:
-                        x0, y0, x1, y1 = word["x0"], word["top"], word["x1"], word["bottom"]
-                        inside_table = any(
-                            t_x0 <= x0 <= t_x1 and t_y0 <= y0 <= t_y1
-                            for (t_x0, t_y0, t_x1, t_y1) in table_bboxes
-                        )
-                        if not inside_table:
-                            final_text.append(word["text"])
-                else:
-                    text = page.extract_text()
-                    if text and len(text) > 10:
-                        final_text.append(text)
-                    else:
-                        is_content.append(page.page_number - 1)
-
-            if tables:
-                try:
-                    df = "\n".join(pd.DataFrame(table[1:], columns=table[0]).to_json(force_ascii=False) for table in tables)
-                except:
-                    df = json.dumps(tables)
-
-            if final_text:
-                final_text = " ".join(final_text) + "\n"
-            else:
-                final_text = ""
-
-        return final_text + df, is_content
+    def extract_text_from_pdf(self, stream):
+        """
+        使用 PyMuPDF (fitz) 安全地从PDF流中提取文本，避免内存溢出
+        """
+        
+        try:
+            # 使用内存流打开PDF
+            doc = fitz.open(stream=stream, filetype="pdf")
+            
+            total_text = ""
+            pages_processed = 0
+            
+            # 限制处理页数以控制内存使用
+            pages_to_process = min(len(doc), 20)  # 最多处理15页
+            
+            for page_num in range(pages_to_process):
+                page = doc.load_page(page_num)
+                
+                # 提取文本
+                text = page.get_text()
+                
+                # 限制单页文本长度
+                if len(text) > 8000:  # 单页最多8KB
+                    text = text[:8000]
+                
+                # 添加页面内容
+                total_text += f"\n--- Page {page_num + 1} ---\n{text}"
+                
+                pages_processed += 1
+                
+                # 检查总体文本长度，防止过大
+                if len(total_text) > 80000:  # 总体最大80KB
+                    total_text = total_text[:80000]
+                    total_text += "\n\n[文档因过大被截断...]"
+                    break
+            
+            doc.close()
+            
+            return total_text, pages_processed
+            
+        except Exception as e:
+            return f"[PDF读取失败: {str(e)[:200]}]", 0
 
     @staticmethod
     def extract_text_from_word(docx_path):
