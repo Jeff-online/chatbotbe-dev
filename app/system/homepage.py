@@ -244,7 +244,12 @@ class SessionManagement(GlobalResource):
         current_app.openai.api_base = config["endpoint"]
         current_app.openai.api_version = config["api_version"]
 
-        CHUNK_SIZE = 40000 
+        CHUNK_SIZE = 40000
+        # 最多允许的图片数量
+        MAX_IMAGES = 50
+        if len(merged_images) > MAX_IMAGES:
+            logger.warning(f"Image count {len(merged_images)} exceeds max {MAX_IMAGES}, truncating to first {MAX_IMAGES} images.")
+            merged_images = merged_images[:MAX_IMAGES]
 
         # 场景 A：文件较小，单次请求即可搞定
         if len(full_text) <= CHUNK_SIZE:
