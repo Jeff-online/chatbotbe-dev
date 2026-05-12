@@ -271,7 +271,7 @@ class FileOperation:
                 # -------- 图片 JPG/PNG --------
                 elif file_extension in ["jpg", "jpeg", "png"]:
                     pic = FileOperation.extract_picture(file_stream, attachment_name)
-                    print(f"🔍 DEBUG: PNG处理结果 - 文件名: {attachment_name}, filenames: {pic.get('filenames', [])}")
+                    print(f"DEBUG: PNG处理结果 - 文件名: {attachment_name}, filenames: {pic.get('filenames', [])}")
 
                     # ⬅️ 完整统一格式：text + images + filenames
                     # ⬅️ 支持多张图片拼接 filenames（即便未来支持多图片上传）
@@ -376,7 +376,7 @@ def cal_tokens(username: str, attachment_names: list, deploy_model: str = "gpt-4
 
             except Exception as e:
                 file_tokens[attachment_name] = 0
-                print(f"⚠️ Error processing {attachment_name}: {e}")
+                print(f"Error processing {attachment_name}: {e}")
 
         return {
             "total_tokens": total_tokens,
@@ -477,11 +477,7 @@ def _estimate_tokens_fast(blob_client, file_extension: str, encoding):
         return int(file_size / 10)
 
     except Exception as e:
-        print(f"⚠️ Error estimating tokens: {e}")
-        return 100
-
-    except Exception as e:
-        print(f"⚠️ Error estimating tokens: {e}")
+        print(f"Error estimating tokens: {e}")
         return 100
 
 # ========================
@@ -498,4 +494,3 @@ def get_cache_stats():
 if __name__ == '__main__':
     file_get = FileOperation()
     # content = file_get("./", ["9Q311103_(Token：54982).pdf"])
-    # print(content)
