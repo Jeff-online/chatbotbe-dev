@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class SessionManagement(GlobalResource):
 
     def get(self):
-        """セッションリスト"""
+        """セッションリスト """
         args_parser = SessionParser()
         args = args_parser.parser.parse_args()
         username = args.get("username")
