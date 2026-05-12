@@ -61,10 +61,10 @@ def register_extensions(app):
         logger.info("正在配置 Azure OpenAI...")
         openai.api_type = "azure_ad"
         
-        # 获取 GPT-5 配置
-        gpt5_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-        gpt5_version = os.getenv("AZURE_OPENAI_API_VERSION")
-        gpt5_deployment = os.getenv("AZURE_OPENAI_MODEL")
+        # 获取 GPT-5.2 配置
+        gpt5_endpoint = os.getenv("AZURE_OPENAI_GPT52_ENDPOINT") or os.getenv("AZURE_OPENAI_ENDPOINT")
+        gpt5_version = os.getenv("AZURE_OPENAI_GPT52_API_VERSION") or os.getenv("AZURE_OPENAI_API_VERSION")
+        gpt5_deployment = os.getenv("AZURE_OPENAI_GPT52_DEPLOYMENT") or os.getenv("AZURE_OPENAI_MODEL")
         
         # 验证必填的环境变量
         if not gpt5_endpoint:
@@ -77,7 +77,7 @@ def register_extensions(app):
             logger.error("缺少环境变量 AZURE_OPENAI_MODEL")
             raise ValueError("缺少环境变量 AZURE_OPENAI_MODEL")
         
-        # 获取 GPT-4o 配置 (可选，默认使用 GPT-5 配置)
+        # 获取 GPT-4o 配置 (可选，默认使用 GPT-5.2 配置)
         gpt4o_endpoint = os.getenv("AZURE_OPENAI_GPT4O_ENDPOINT") or gpt5_endpoint
         gpt4o_version = os.getenv("AZURE_OPENAI_GPT4O_API_VERSION") or gpt5_version
         gpt4o_deployment = os.getenv("AZURE_OPENAI_GPT4O_DEPLOYMENT") or gpt5_deployment
@@ -89,13 +89,13 @@ def register_extensions(app):
         
         # 保存模型配置
         app.model_configs = {
-            "gpt-5": {"endpoint": gpt5_endpoint, "api_version": gpt5_version, "deployment": gpt5_deployment},
+            "gpt-5.2": {"endpoint": gpt5_endpoint, "api_version": gpt5_version, "deployment": gpt5_deployment},
             "gpt-4o": {"endpoint": gpt4o_endpoint, "api_version": gpt4o_version, "deployment": gpt4o_deployment},
         }
-        app.default_model = "gpt-5"
+        app.default_model = "gpt-5.2"
         
         # 记录配置信息
-        logger.info(f"GPT-5 配置：endpoint={gpt5_endpoint}, version={gpt5_version}, deployment={gpt5_deployment}")
+        logger.info(f"GPT-5.2 配置：endpoint={gpt5_endpoint}, version={gpt5_version}, deployment={gpt5_deployment}")
         logger.info(f"GPT-4o 配置：endpoint={gpt4o_endpoint}, version={gpt4o_version}, deployment={gpt4o_deployment}")
         logger.info(f"默认模型：{app.default_model}")
         logger.info("Azure OpenAI 配置完成")
@@ -122,7 +122,6 @@ def register_blueprints(app):
     app.register_blueprint(wuser, url_prefix=prefix)
     from .system import wsystem
     app.register_blueprint(wsystem, url_prefix=prefix)
-
 
 
 
