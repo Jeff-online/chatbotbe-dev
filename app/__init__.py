@@ -82,7 +82,7 @@ def register_extensions(app):
         gpt4o_version = os.getenv("AZURE_OPENAI_GPT4O_API_VERSION") or gpt5_version
         gpt4o_deployment = os.getenv("AZURE_OPENAI_GPT4O_DEPLOYMENT") or gpt5_deployment
         
-        # 设置 OpenAI API 参数
+        # 设置 OpenAI API 参数 
         openai.api_base = gpt5_endpoint
         openai.api_version = gpt5_version
         deployment_id = gpt5_deployment
