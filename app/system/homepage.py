@@ -375,8 +375,8 @@ class SessionManagement(GlobalResource):
                 if attachment_name:  # 如果列表不为空
                     get_file_content = FileOperation()
                     file_content = get_file_content(username, attachment_name)  # 返回 dict
-                    print(f"🔍 DEBUG: check_name处理结果 - 文件列表: {attachment_name}")
-                    print(f"🔍 DEBUG: file_content keys: {list(file_content.keys()) if file_content else 'None'}")
+                    print(f"DEBUG: check_name处理结果 - 文件列表: {attachment_name}")
+                    print(f"DEBUG: file_content keys: {list(file_content.keys()) if file_content else 'None'}")
         except Exception as e:
             logger.error(f"Error occurred while getting file content: {e}")
             return {"message in the check name function after FileOperation": str(e), "status": 404, "attachment_name_type": type(attachment_name)}
@@ -469,7 +469,6 @@ class FileManagement(GlobalResource):
                 }
             except Exception as e:
                 logger.error(f"❌ Error during file upload processing: {str(e)}", exc_info=True)
-                return {'msg': f"Azure upload failed: {str(e)}", "code": 417}
                 return {'msg': f"Azure upload failed: {str(e)}", "code": 417}
 
         return {'msg': 'Invalid file type', "code": 400}
