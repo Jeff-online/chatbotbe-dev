@@ -16,13 +16,14 @@ from werkzeug.utils import secure_filename
 from common.common_resource import GlobalResource, Resource
 import json
 from .task_queue import TaskQueue, QueueState, QueueConcurrencyLock
+from azure.storage.blob import BlobServiceClient
 logger = logging.getLogger(__name__)
 
 
 class SessionManagement(GlobalResource):
 
     def get(self):
-        """セッションリスト """
+        """セッションリスト"""
         args_parser = SessionParser()
         args = args_parser.parser.parse_args()
         username = args.get("username")
@@ -150,7 +151,7 @@ class SessionManagement(GlobalResource):
                                 QueueState.update_statuses_by_filenames(username, file_list, "processing", session_id=session_id)
                             
                             content = clue + content
-                            content, response_ai, used_model = self.get_answer(file_content, content, dialogue_history, history_data, deploy_model)
+                            content, response_ai, used_model = self.get_answer(session_id, file_content, content, dialogue_history, history_data, deploy_model)
                             
                             # After AI finishes, update status to 'parsed'
                             if attachment_names:
@@ -210,7 +211,7 @@ class SessionManagement(GlobalResource):
         raise messages.UserNotExistsError
 
     @staticmethod
-    def get_answer(file_content: dict, input_data: str, question: list, history=None, deploy_model=None):
+    def get_answer(session_id: str, file_content: dict, input_data: str, question: list, history=None, deploy_model=None):
         """
         file_content: dict {filename: {"text": str, "images": [base64,...]}, ...}
         """
@@ -223,6 +224,8 @@ class SessionManagement(GlobalResource):
         # 1. 提取文本与图片
         merged_texts = []
         merged_images = []
+
+        # 处理传入的文件
         if file_content:
             for fname, fdata in file_content.items():
                 if fdata.get("text"):
@@ -230,7 +233,42 @@ class SessionManagement(GlobalResource):
                 if fdata.get("images"):
                     merged_images.extend(fdata["images"])
 
-        full_text = "\n\n".join(merged_texts) if merged_texts else ""
+        # 初始化 Blob 客户端
+        try:
+            connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
+            blob_service_client = BlobServiceClient.from_connection_string(connect_str)
+            container_client = blob_service_client.get_container_client("ailabdatanridev")
+            
+            # 定义当前会话专属的缓存文件路径，例如：session_cache/12345-abcd.txt
+            blob_client = container_client.get_blob_client(f"session_cache/{session_id}.txt")
+        except Exception as e:
+            logger.error(f"Blob Storage 初始化失败，请检查连接字符串: {str(e)}")
+            raise Exception("系统存储组件连接失败。")
+
+        # 覆盖写入
+        if merged_texts:
+            # 【回合 1】用户传了新文件：将解析出的完整文本直接存入 Blob
+            full_text = "\n\n".join(merged_texts)
+            try:
+                # 以 utf-8 编码上传并覆盖旧文件
+                blob_client.upload_blob(full_text.encode('utf-8'), overwrite=True)
+                logger.info(f"Session {session_id}: 已接收新文件并存入 Blob Storage 缓存，长度 {len(full_text)} 字。")
+            except Exception as e:
+                logger.error(f"存入 Blob 失败: {str(e)}")
+                # 即使存失败了，第一回合依然可以让全文本继续往下走
+                pass 
+                
+        else:
+            # 【回合 2+】用户没传文件：直接去 Blob 里读取上一轮存好的文本
+            try:
+                # 从 Blob 下载并解码为字符串
+                download_stream = blob_client.download_blob()
+                full_text = download_stream.readall().decode('utf-8')
+                logger.info(f"Session {session_id}: 未传新文件，已从 Blob 成功加载历史文件，长度 {len(full_text)} 字。")
+            except Exception as e:
+                # 终极拦截器：如果 Blob 里找不到（报错 404），说明是真的没传过文件
+                logger.error(f"Blob 缓存读取失败 (可能是未上传或已过期): {str(e)}")
+                raise Exception("文件解析失败或未检测到有效附件，请重新上传文件。")
 
         # 2. Token 刷新与配置
         if time.time() >= current_app.token_expires - 600:
@@ -244,7 +282,7 @@ class SessionManagement(GlobalResource):
         current_app.openai.api_base = config["endpoint"]
         current_app.openai.api_version = config["api_version"]
 
-        CHUNK_SIZE = 40000
+        CHUNK_SIZE = 400000
         # 最多允许的图片数量
         MAX_IMAGES = 50
         if len(merged_images) > MAX_IMAGES:
