@@ -232,18 +232,36 @@ class SessionManagement(GlobalResource):
                     merged_texts.append(f"[{fname}]\n{fdata['text']}")
                 if fdata.get("images"):
                     merged_images.extend(fdata["images"])
-
+        full_text = ""
         # 初始化 Blob 客户端
         try:
             connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
-            blob_service_client = BlobServiceClient.from_connection_string(connect_str)
-            container_client = blob_service_client.get_container_client("ailabdatanridev")
-            
-            # 定义当前会话专属的缓存文件路径，例如：session_cache/12345-abcd.txt
-            blob_client = container_client.get_blob_client(f"session_cache/{session_id}.txt")
+            # 保护机制：如果没有配置连接字符串，直接跳过缓存逻辑，不引发崩溃
+            if not connect_str:
+                logger.warning("未配置 Blob 密钥，缓存功能已跳过。")
+                full_text = "\n\n".join(merged_texts) if merged_texts else ""
+            else:
+                blob_service_client = BlobServiceClient.from_connection_string(connect_str)
+                container_client = blob_service_client.get_container_client("ailabdatanri")
+                blob_client = container_client.get_blob_client(f"session_cache/{session_id}.txt")
+
+                if merged_texts:
+                    # 回合 1：写入
+                    full_text = "\n\n".join(merged_texts)
+                    blob_client.upload_blob(full_text.encode('utf-8'), overwrite=True)
+                else:
+                    # 回合 2：读取
+                    download_stream = blob_client.download_blob()
+                    full_text = download_stream.readall().decode('utf-8')
+                    
         except Exception as e:
-            logger.error(f"Blob Storage 初始化失败，请检查连接字符串: {str(e)}")
-            raise Exception("系统存储组件连接失败。")
+            # 核心抢救点：如果报错了，不要 raise Exception 崩溃！
+            # 而是把文件内容设置成一段系统提示，让 AI 告诉你们哪坏了
+            logger.error(f"Blob 缓存组件异常: {str(e)}")
+            if not merged_texts:
+                 full_text = f"> **系统底层提示**：未能加载您的历史文件，原因：存储组件异常或未上传文件。({str(e)})"
+            else:
+                 full_text = "\n\n".join(merged_texts)
 
         # 覆盖写入
         if merged_texts:
