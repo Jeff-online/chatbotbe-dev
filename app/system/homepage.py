@@ -232,58 +232,45 @@ class SessionManagement(GlobalResource):
                     merged_texts.append(f"[{fname}]\n{fdata['text']}")
                 if fdata.get("images"):
                     merged_images.extend(fdata["images"])
+
+        # 核心记忆逻辑：Azure Blob Storage 缓存方案
         full_text = ""
-        # 初始化 Blob 客户端
+        
         try:
+            # 极速通道：没传文件，也没有历史记录（新开窗口纯文字）
             if not merged_texts and not history:
+                print("触发纯文字新对话极速通道，跳过存储组件")
                 full_text = ""
             else:
                 connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
                 if not connect_str:
+                    logger.warning("未配置 Blob 密钥，缓存功能已跳过。")
                     full_text = "\n\n".join(merged_texts) if merged_texts else ""
                 else:
                     blob_service_client = BlobServiceClient.from_connection_string(connect_str)
                     container_client = blob_service_client.get_container_client("chatarea")
-                    blob_client = container_client.get_blob_client(f"{username}session_cache/{session_id}.txt")
+
+                    blob_path = f"{username}/session_cache/{session_id}.txt"
+                    blob_client = container_client.get_blob_client(blob_path)
 
                     if merged_texts:
-                        # 写入
+                        # 【回合 1】用户传了新文件：写入并覆盖
                         full_text = "\n\n".join(merged_texts)
                         blob_client.upload_blob(full_text.encode('utf-8'), overwrite=True)
+                        logger.info(f"Session {session_id}: 文件已存入 Blob，路径: {blob_path}")
                     else:
-                        # 读取前先判断存不存在
+                        # 【回合 2+】用户没传文件：读取前先判断存不存在
                         if blob_client.exists():
                             download_stream = blob_client.download_blob()
                             full_text = download_stream.readall().decode('utf-8')
+                            logger.info(f"Session {session_id}: 成功从 Blob 读取历史缓存。")
                         else:
+                            # 万一没找到，安全降级为空
                             full_text = ""
+                            
         except Exception as e:
+            logger.error(f"Blob 缓存组件异常: {str(e)}")
             full_text = "\n\n".join(merged_texts) if merged_texts else ""
-
-        # 覆盖写入
-        if merged_texts:
-            # 【回合 1】用户传了新文件：将解析出的完整文本直接存入 Blob
-            full_text = "\n\n".join(merged_texts)
-            try:
-                # 以 utf-8 编码上传并覆盖旧文件
-                blob_client.upload_blob(full_text.encode('utf-8'), overwrite=True)
-                logger.info(f"Session {session_id}: 已接收新文件并存入 Blob Storage 缓存，长度 {len(full_text)} 字。")
-            except Exception as e:
-                logger.error(f"存入 Blob 失败: {str(e)}")
-                # 即使存失败了，第一回合依然可以让全文本继续往下走
-                pass 
-                
-        else:
-            # 【回合 2+】用户没传文件：直接去 Blob 里读取上一轮存好的文本
-            try:
-                # 从 Blob 下载并解码为字符串
-                download_stream = blob_client.download_blob()
-                full_text = download_stream.readall().decode('utf-8')
-                logger.info(f"Session {session_id}: 未传新文件，已从 Blob 成功加载历史文件，长度 {len(full_text)} 字。")
-            except Exception as e:
-                # 终极拦截器：如果 Blob 里找不到（报错 404），说明是真的没传过文件
-                logger.error(f"Blob 缓存读取失败 (可能是未上传或已过期): {str(e)}")
-                raise Exception("文件解析失败或未检测到有效附件，请重新上传文件。")
 
         # 2. Token 刷新与配置
         if time.time() >= current_app.token_expires - 600:
