@@ -235,36 +235,30 @@ class SessionManagement(GlobalResource):
         full_text = ""
         # 初始化 Blob 客户端
         try:
-            connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
-            if not connect_str:
-                logger.warning("未配置 Blob 密钥，缓存功能已跳过。")
-                full_text = "\n\n".join(merged_texts) if merged_texts else ""
+            if not merged_texts and not history:
+                full_text = ""
             else:
-                blob_service_client = BlobServiceClient.from_connection_string(connect_str)
-                container_client = blob_service_client.get_container_client("chatarea")
-                
-                # 拼接到路径最前面
-                blob_path = f"{username}/session_cache/{session_id}.txt"
-                blob_client = container_client.get_blob_client(blob_path)
-
-                if merged_texts:
-                    # 回合 1：写入
-                    full_text = "\n\n".join(merged_texts)
-                    blob_client.upload_blob(full_text.encode('utf-8'), overwrite=True)
+                connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
+                if not connect_str:
+                    full_text = "\n\n".join(merged_texts) if merged_texts else ""
                 else:
-                    # 回合 2：读取
-                    if blob_client.exists():
-                        download_stream = blob_client.download_blob()
-                        full_text = download_stream.readall().decode('utf-8')
+                    blob_service_client = BlobServiceClient.from_connection_string(connect_str)
+                    container_client = blob_service_client.get_container_client("chatarea")
+                    blob_client = container_client.get_blob_client(f"{username}session_cache/{session_id}.txt")
+
+                    if merged_texts:
+                        # 写入
+                        full_text = "\n\n".join(merged_texts)
+                        blob_client.upload_blob(full_text.encode('utf-8'), overwrite=True)
                     else:
-                        full_text = ""
-                    
+                        # 读取前先判断存不存在
+                        if blob_client.exists():
+                            download_stream = blob_client.download_blob()
+                            full_text = download_stream.readall().decode('utf-8')
+                        else:
+                            full_text = ""
         except Exception as e:
-            logger.error(f"Blob 缓存组件异常: {str(e)}")
-            if not merged_texts:
-                 full_text = ""
-            else:
-                 full_text = "\n\n".join(merged_texts)
+            full_text = "\n\n".join(merged_texts) if merged_texts else ""
 
         # 覆盖写入
         if merged_texts:
