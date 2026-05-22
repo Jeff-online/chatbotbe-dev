@@ -151,7 +151,7 @@ class SessionManagement(GlobalResource):
                                 QueueState.update_statuses_by_filenames(username, file_list, "processing", session_id=session_id)
                             
                             content = clue + content
-                            content, response_ai, used_model = self.get_answer(session_id, file_content, content, dialogue_history, history_data, deploy_model)
+                            content, response_ai, used_model = self.get_answer(session_id, username, file_content, content, dialogue_history, history_data, deploy_model)
                             
                             # After AI finishes, update status to 'parsed'
                             if attachment_names:
@@ -211,7 +211,7 @@ class SessionManagement(GlobalResource):
         raise messages.UserNotExistsError
 
     @staticmethod
-    def get_answer(session_id: str, file_content: dict, input_data: str, question: list, history=None, deploy_model=None):
+    def get_answer(session_id: str, username: str, file_content: dict, input_data: str, question: list, history=None, deploy_model=None):
         """
         file_content: dict {filename: {"text": str, "images": [base64,...]}, ...}
         """
@@ -236,14 +236,16 @@ class SessionManagement(GlobalResource):
         # 初始化 Blob 客户端
         try:
             connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
-            # 保护机制：如果没有配置连接字符串，直接跳过缓存逻辑，不引发崩溃
             if not connect_str:
                 logger.warning("未配置 Blob 密钥，缓存功能已跳过。")
                 full_text = "\n\n".join(merged_texts) if merged_texts else ""
             else:
                 blob_service_client = BlobServiceClient.from_connection_string(connect_str)
                 container_client = blob_service_client.get_container_client("chatarea")
-                blob_client = container_client.get_blob_client(f"session_cache/{session_id}.txt")
+                
+                # 拼接到路径最前面
+                blob_path = f"{username}/session_cache/{session_id}.txt"
+                blob_client = container_client.get_blob_client(blob_path)
 
                 if merged_texts:
                     # 回合 1：写入
@@ -251,15 +253,16 @@ class SessionManagement(GlobalResource):
                     blob_client.upload_blob(full_text.encode('utf-8'), overwrite=True)
                 else:
                     # 回合 2：读取
-                    download_stream = blob_client.download_blob()
-                    full_text = download_stream.readall().decode('utf-8')
+                    if blob_client.exists():
+                        download_stream = blob_client.download_blob()
+                        full_text = download_stream.readall().decode('utf-8')
+                    else:
+                        full_text = ""
                     
         except Exception as e:
-            # 核心抢救点：如果报错了，不要 raise Exception 崩溃！
-            # 而是把文件内容设置成一段系统提示，让 AI 告诉你们哪坏了
             logger.error(f"Blob 缓存组件异常: {str(e)}")
             if not merged_texts:
-                 full_text = f"> **系统底层提示**：未能加载您的历史文件，原因：存储组件异常或未上传文件。({str(e)})"
+                 full_text = ""
             else:
                  full_text = "\n\n".join(merged_texts)
 
