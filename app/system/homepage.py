@@ -242,7 +242,7 @@ class SessionManagement(GlobalResource):
                 full_text = "\n\n".join(merged_texts) if merged_texts else ""
             else:
                 blob_service_client = BlobServiceClient.from_connection_string(connect_str)
-                container_client = blob_service_client.get_container_client("ailabdatanri")
+                container_client = blob_service_client.get_container_client("chatarea")
                 blob_client = container_client.get_blob_client(f"session_cache/{session_id}.txt")
 
                 if merged_texts:
