@@ -4,6 +4,7 @@ import logging
 import json
 import time
 import random
+import base64
 from datetime import datetime, timedelta, timezone
 from app import messages
 from . import system_api
@@ -768,6 +769,8 @@ class TaskQueue(GlobalResource):
         }
         message_json = json.dumps(message_payload)
 
+        encoded_message = base64.b64encode(message_json.encode('utf-8')).decode('utf-8')
+
         try:
             queue_client = self._get_queue_client(queue_name)
             try:
@@ -775,7 +778,8 @@ class TaskQueue(GlobalResource):
             except ResourceExistsError:
                 pass
             
-            send_result = queue_client.send_message(message_json)
+            # 使用编码后的消息发送
+            send_result = queue_client.send_message(encoded_message)
             queue_state_id = QueueState.create(
                 username=username,
                 queue_name=queue_name,
@@ -813,10 +817,16 @@ class TaskQueue(GlobalResource):
             
             result = []
             for msg in messages_received:
+                raw_content = msg.content
                 try:
-                    content = json.loads(msg.content)
-                except:
-                    content = msg.content
+                    decoded_str = base64.b64decode(raw_content).decode('utf-8')
+                    content = json.loads(decoded_str)
+                except Exception:
+                    # 如果解码失败，说明它是没加 Base64 的历史老数据，直接按原样解析
+                    try:
+                        content = json.loads(raw_content)
+                    except:
+                        content = raw_content
                 
                 result.append({
                     "message_id": msg.id,
@@ -929,10 +939,12 @@ class TaskQueue(GlobalResource):
                 }
                 message_json = json.dumps(message_payload)
 
+            encoded_message = base64.b64encode(message_json.encode('utf-8')).decode('utf-8')
+
             update_result = queue_client.update_message(
                 message_id, 
                 pop_receipt, 
-                content=message_json, 
+                content=encoded_message, # 使用编码后的内容更新
                 visibility_timeout=visibility_timeout
             )
             
@@ -1149,12 +1161,18 @@ class SubmitQueuedTasks(GlobalResource):
                                 msg_data = json.loads(item['message'])
                                 if 'message' in msg_data:
                                     msg_data['message'] = TaskQueue._truncate_message(msg_data['message'])
+
+                                if 'system_filename' not in msg_data:
+                                    logger.warning(f"⚠️ Warning: Task missing system_filename, legacy data format detected.")
+
                                 final_message = json.dumps(msg_data)
                             except:
                                 final_message = item['message']
-                                
-                            send_result = queue_client.send_message(final_message)
-                            logger.info(f"✅ Sent to queue {queue_name}, message_id: {send_result.id}")
+
+                            encoded_message = base64.b64encode(final_message.encode('utf-8')).decode('utf-8')
+
+                            send_result = queue_client.send_message(encoded_message)
+                            logger.info(f"✅ Sent to queue {queue_name} (Base64 encoded), message_id: {send_result.id}")
                             
                             message_id = send_result.id
                             pop_receipt = send_result.pop_receipt
