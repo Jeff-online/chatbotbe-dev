@@ -9,6 +9,7 @@ import pandas as pd
 from PIL import Image
 from flask import current_app
 import tiktoken
+import logging
 
 
 class FileOperation:
@@ -109,7 +110,11 @@ class FileOperation:
 
     @staticmethod
     def extract_text_from_word(docx_path):
-        doc = docx.Document(docx_path)
+        try:
+            doc = docx.Document(docx_path)
+        except Exception as e:
+            logging.error(f"加载 DOCX 文档失败，可能是路径或编码问题: {docx_path}, 错误: {str(e)}")
+            return ""
         text = "\n".join([p.text for p in doc.paragraphs])
         tables = []
         df = ""
@@ -124,7 +129,10 @@ class FileOperation:
 
         if tables:
             try:
-                df = pd.DataFrame(tables[0][1:], columns=tables[0][0]).to_json(force_ascii=False)
+                if len(tables[0]) > 1:
+                    df = pd.DataFrame(tables[0][1:], columns=tables[0][0]).to_json(force_ascii=False)
+                else:
+                    df = json.dumps(tables, ensure_ascii=False)
             except:
                 df = json.dumps(tables, ensure_ascii=False)
 
