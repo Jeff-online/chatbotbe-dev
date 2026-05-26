@@ -200,15 +200,8 @@ class FileOperation:
         for attachment_name in attachment_names:
             try:
                 file_extension = attachment_name.rsplit(".", 1)[1].lower()
-                import urllib.parse
-                safe_encoded_name = urllib.parse.quote(attachment_name)
-                try:
-                    blob_client = current_app.container_client.get_blob_client(f"{username}/{safe_encoded_name}")
-                    stream = blob_client.download_blob().readall()
-                except Exception as e:
-                    blob_client = current_app.container_client.get_blob_client(f"{username}/{attachment_name}")
-                    stream = blob_client.download_blob().readall()
-
+                blob_client = current_app.container_client.get_blob_client(f"{username}/{attachment_name}")
+                stream = blob_client.download_blob().readall()
                 file_stream = io.BytesIO(stream)
                 encoding = chardet.detect(stream)["encoding"]
                 # -------- TXT --------
