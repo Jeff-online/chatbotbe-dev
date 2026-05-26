@@ -5,6 +5,7 @@ import json
 import time
 import random
 import base64
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from app import messages
 from . import system_api
@@ -993,7 +994,6 @@ class DeleteUploadedRecord(GlobalResource):
         根据文件名删除 uploaded 状态的记录
         """
         try:
-            import json
             from flask import request
             
             data = request.get_json()
@@ -1070,7 +1070,6 @@ class SubmitQueuedTasks(GlobalResource):
         前端应传递 attachment_names 列表，后端会找到对应的 uploaded 状态记录并转换为 queued 状态
         """
         try:
-            import json
             from flask import request
             
             data = request.get_json()
@@ -1111,11 +1110,16 @@ class SubmitQueuedTasks(GlobalResource):
                         pass
                 
                 file_attachments = message_data.get('attachment_names', []) if isinstance(message_data, dict) else []
-                
+
+                def norm(s):
+                    return unicodedata.normalize('NFC', str(s)) if s else ""
+                norm_attachment_names = [norm(name) for name in attachment_names]
+
                 # 检查这个记录是否在要提交的附件列表中
                 should_submit = False
                 for filename in file_attachments:
-                    if filename in attachment_names:
+                    # 比较洗脸（规范化）后的字符串
+                    if norm(filename) in norm_attachment_names:
                         should_submit = True
                         break
                 
@@ -1223,7 +1227,6 @@ class ProcessTaskWithLock(GlobalResource):
         从队列中获取任务并使用锁机制进行处理
         """
         try:
-            import json
             from flask import request
             
             data = request.get_json()
