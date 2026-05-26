@@ -461,13 +461,11 @@ class FileManagement(GlobalResource):
         if file and self.allowed_file(file.filename):
             try:
                 original_filename = file.filename
-                ext = os.path.splitext(original_filename)[1]
-                safe_system_filename = f"{uuid.uuid4().hex}{ext}"
                 
                 # 1. Upload to Blob Storage
-                blob_client = current_app.container_client.get_blob_client(f"{username}/{safe_system_filename}")
+                blob_client = current_app.container_client.get_blob_client(f"{username}/{file.filename}")
                 blob_client.upload_blob(file.stream, overwrite=True)
-                logger.info(f"✅ File '{original_filename}' uploaded successfully to Azure Blob Storage as '{safe_system_filename}'")
+                logger.info(f"✅ File '{file.filename}' uploaded successfully to Azure Blob Storage")
 
                 # 2. Determine Queue (Light vs Heavy)
                 attachment_names = [original_filename] 
@@ -488,8 +486,7 @@ class FileManagement(GlobalResource):
                     "status": status,
                     "message": f"File uploaded: {original_filename}",
                     "attachment_names": attachment_names,
-                    "session_id": session_id,
-                    "system_filename": safe_system_filename
+                    "session_id": session_id
                 }
                 message_json = json.dumps(message_payload)
                 
@@ -505,10 +502,9 @@ class FileManagement(GlobalResource):
                 logger.info(f"✅ Successfully created database record: {queue_state_id}")
                 
                 return {
-                    'message': f"File '{original_filename}' uploaded successfully",
-                    'file_path': f"{username}/{safe_system_filename}",
-                    'filename': original_filename,
-                    'system_filename': safe_system_filename,
+                    'message': f"File '{file.filename}' uploaded successfully",
+                    'file_path': f"{username}/{file.filename}",
+                    'filename': file.filename,
                     'queue_name': queue_name,
                     'queue_state_id': queue_state_id,
                     "code": 200
@@ -531,20 +527,17 @@ class FileManagement(GlobalResource):
             try:
                 
                 original_filename = file.filename
-                ext = os.path.splitext(original_filename)[1]
-                safe_system_filename = f"{uuid.uuid4().hex}{ext}"
 
                 # 检查/上传文件（使用安全文件名覆盖）
-                blob_client = current_app.container_client.get_blob_client(f"{username}/{safe_system_filename}")
+                blob_client = current_app.container_client.get_blob_client(f"{username}/{file.filename}")
                 blob_client.upload_blob(file.stream, overwrite=True)
+                logger.info(f"✅ File '{file.filename}' uploaded successfully to Azure Blob Storage")
 
-                logger.info(f"File '{original_filename}' updated successfully as '{safe_system_filename}'")
                 return {
                     'message': f"File '{original_filename}' updated successfully",
-                    'file_path': f"{username}/{safe_system_filename}",  # 返回安全的真实路径
-                    'filename': original_filename,
+                    'file_path': f"{username}/{file.filename}",  # 返回安全的真实路径
+                    'filename': file.filename,
                     'original_filename': original_filename,  
-                    'system_filename': safe_system_filename,
                     'secure_filename': secure_filename(original_filename) if secure_filename else original_filename,
                     "code": 200
                 }
