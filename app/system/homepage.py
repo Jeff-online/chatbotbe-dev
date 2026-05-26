@@ -460,36 +460,41 @@ class FileManagement(GlobalResource):
         
         if file and self.allowed_file(file.filename):
             try:
+                original_filename = file.filename
+                ext = os.path.splitext(original_filename)[1]
+                safe_system_filename = f"{uuid.uuid4().hex}{ext}"
+                
                 # 1. Upload to Blob Storage
-                blob_client = current_app.container_client.get_blob_client(f"{username}/{file.filename}")
+                blob_client = current_app.container_client.get_blob_client(f"{username}/{safe_system_filename}")
                 blob_client.upload_blob(file.stream, overwrite=True)
-                logger.info(f"✅ File '{file.filename}' uploaded successfully to Azure Blob Storage")
+                logger.info(f"✅ File '{original_filename}' uploaded successfully to Azure Blob Storage as '{safe_system_filename}'")
 
                 # 2. Determine Queue (Light vs Heavy)
-                attachment_names = [file.filename]
+                attachment_names = [original_filename] 
                 token_result = cal_tokens(username, attachment_names)
                 total_tokens = token_result.get("total_tokens", 0)
-                logger.info(f"📊 Token estimation for {file.filename}: {total_tokens}")
+                logger.info(f"📊 Token estimation for {original_filename}: {total_tokens}")
                 
                 queue_name = "heavy-queue" if total_tokens > TaskQueue.HEAVY_QUEUE_THRESHOLD else "light-queue"
                 
                 # 3. Create Cosmos DB record ONLY (status: uploaded)
                 create_time = datetime.now().isoformat()
                 status = "uploaded"
-                
+
                 message_payload = {
                     "queue_name": queue_name,
                     "user-name": username,
                     "create_time": create_time,
                     "status": status,
-                    "message": f"File uploaded: {file.filename}",
+                    "message": f"File uploaded: {original_filename}",
                     "attachment_names": attachment_names,
-                    "session_id": session_id
+                    "session_id": session_id,
+                    "system_filename": safe_system_filename
                 }
                 message_json = json.dumps(message_payload)
                 
                 # Create DB record ONLY
-                logger.info(f"📝 Creating database record for file: {file.filename}")
+                logger.info(f"📝 Creating database record for file: {original_filename}")
                 queue_state_id = QueueState.create(
                     username=username,
                     queue_name=queue_name,
@@ -500,9 +505,10 @@ class FileManagement(GlobalResource):
                 logger.info(f"✅ Successfully created database record: {queue_state_id}")
                 
                 return {
-                    'message': f"File '{file.filename}' uploaded successfully",
-                    'file_path': f"{username}/{file.filename}",
-                    'filename': file.filename,
+                    'message': f"File '{original_filename}' uploaded successfully",
+                    'file_path': f"{username}/{safe_system_filename}",
+                    'filename': original_filename,
+                    'system_filename': safe_system_filename,
                     'queue_name': queue_name,
                     'queue_state_id': queue_state_id,
                     "code": 200
@@ -523,19 +529,23 @@ class FileManagement(GlobalResource):
             raise messages.UserNameNotExistsError
         if file and self.allowed_file(file.filename):
             try:
-                # 检查文件是否存在
-                blob_client = current_app.container_client.get_blob_client(f"{username}/{file.filename}")
                 
-                # 上传文件（覆盖现有文件）
+                original_filename = file.filename
+                ext = os.path.splitext(original_filename)[1]
+                safe_system_filename = f"{uuid.uuid4().hex}{ext}"
+
+                # 检查/上传文件（使用安全文件名覆盖）
+                blob_client = current_app.container_client.get_blob_client(f"{username}/{safe_system_filename}")
                 blob_client.upload_blob(file.stream, overwrite=True)
 
-                logger.info(f"File '{file.filename}' updated successfully")
+                logger.info(f"File '{original_filename}' updated successfully as '{safe_system_filename}'")
                 return {
-                    'message': f"File '{file.filename}' updated successfully",
-                    'file_path': f"{username}/{file.filename}",
-                    'filename': file.filename,  # 明确返回文件名
-                    'original_filename': file.filename,  # 原始文件名
-                    'secure_filename': secure_filename(file.filename),  # 安全文件名
+                    'message': f"File '{original_filename}' updated successfully",
+                    'file_path': f"{username}/{safe_system_filename}",  # 返回安全的真实路径
+                    'filename': original_filename,
+                    'original_filename': original_filename,  
+                    'system_filename': safe_system_filename,
+                    'secure_filename': secure_filename(original_filename) if secure_filename else original_filename,
                     "code": 200
                 }
             except Exception as e:
