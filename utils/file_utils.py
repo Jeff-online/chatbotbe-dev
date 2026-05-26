@@ -192,7 +192,7 @@ class FileOperation:
     # -------------------------
     #        主入口
     # -------------------------
-    def __call__(self, username: str, attachment_names: list):
+    def __call__(self, username: str, attachment_names: list, message_data: dict = None):
         if not isinstance(attachment_names, list):
             return {"message": "Invalid attachment_names format", "status": 400}
         
@@ -200,8 +200,28 @@ class FileOperation:
         for attachment_name in attachment_names:
             try:
                 file_extension = attachment_name.rsplit(".", 1)[1].lower()
-                blob_client = current_app.container_client.get_blob_client(f"{username}/{attachment_name}")
-                stream = blob_client.download_blob().readall()
+                target_blob_name = attachment_name
+                
+                # 1. 尝试从传递进来的 message_data 中获取系统安全名字 (针对新上传的文件)
+                if message_data and message_data.get('system_filename'):
+                    target_blob_name = message_data.get('system_filename')
+                    print(f"DEBUG: 使用安全系统名进行下载: {target_blob_name} (原名: {attachment_name})")
+                
+                # 2. 如果 URL 存在特殊字符，强制进行 URL 编码（这是给未经过 UUID 处理的老文件的最后一道防线）
+                import urllib.parse
+                # 仅对 blob 名字进行编码，保留 '/' 结构
+                safe_encoded_blob_name = urllib.parse.quote(target_blob_name)
+                
+                try:
+                    # 优先尝试使用原本拼接的名字下载 (如果后端 SDK 内部处理了的话)
+                    blob_client = current_app.container_client.get_blob_client(f"{username}/{target_blob_name}")
+                    stream = blob_client.download_blob().readall()
+                except Exception as raw_e:
+                    print(f"DEBUG: 原始名称下载失败，尝试使用 URL Encode 名称下载... 错误: {raw_e}")
+                    # 如果原名下载失败，立即使用转码后的安全名字再试一次！
+                    blob_client = current_app.container_client.get_blob_client(f"{username}/{safe_encoded_blob_name}")
+                    stream = blob_client.download_blob().readall()
+
                 file_stream = io.BytesIO(stream)
                 encoding = chardet.detect(stream)["encoding"]
                 # -------- TXT --------
