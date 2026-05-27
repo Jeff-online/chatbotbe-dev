@@ -296,11 +296,11 @@ class FileOperation:
                         
                         # 提取图片（如果不需要可以去掉）
                         word_images = []
-                        try:
-                            file_stream.seek(0)
-                            word_images = self.extract_images_from_word(file_stream)
-                        except Exception as img_err:
-                            print(f"DEBUG: 图片提取失败: {img_err}")
+                        # try:
+                        #     file_stream.seek(0)
+                        #     word_images = self.extract_images_from_word(file_stream)
+                        # except Exception as img_err:
+                        #     print(f"DEBUG: 图片提取失败: {img_err}")
                             
                         results[attachment_name] = {
                             "text": word_text,
