@@ -264,48 +264,54 @@ class FileOperation:
                     }
 
                 # -------- Word DOCX --------
-                elif file_extension == "docx":
+                # elif file_extension == "docx":
                     
-                    # 1. 生成绝对安全的 UUID 替身路径，避开任何日文/全角特殊字符
-                    temp_uuid_name = f"{uuid.uuid4().hex}.docx"
-                    safe_temp_path = f"/tmp/{temp_uuid_name}"
+                #     # 1. 生成绝对安全的 UUID 替身路径，避开任何日文/全角特殊字符
+                #     temp_uuid_name = f"{uuid.uuid4().hex}.docx"
+                #     safe_temp_path = f"/tmp/{temp_uuid_name}"
                     
-                    try:
-                        # 2. 将内存里的流落地为绝对安全的临时文件
-                        file_stream.seek(0)
-                        with open(safe_temp_path, "wb") as f:
-                            f.write(file_stream.read())
+                #     try:
+                #         # 2. 将内存里的流落地为绝对安全的临时文件
+                #         file_stream.seek(0)
+                #         with open(safe_temp_path, "wb") as f:
+                #             f.write(file_stream.read())
                             
-                        # 3. 提取文本，传入绝对安全的本地路径
-                        word_text = self.extract_text_from_word(safe_temp_path)
+                #         # 3. 提取文本，传入绝对安全的本地路径
+                #         word_text = self.extract_text_from_word(safe_temp_path)
                         
-                        # 4. 提取图片，同样传入绝对安全的本地路径
-                        try:
-                            word_images = self.extract_images_from_word(safe_temp_path)
-                        except Exception as e:
-                            print(f"DEBUG: Failed to extract images from DOCX: {e}")
-                            word_images = []
+                #         # 4. 提取图片，同样传入绝对安全的本地路径
+                #         try:
+                #             word_images = self.extract_images_from_word(safe_temp_path)
+                #         except Exception as e:
+                #             print(f"DEBUG: Failed to extract images from DOCX: {e}")
+                #             word_images = []
                             
-                    except Exception as e:
-                        # 加上这层巨大的 try-except，哪怕提取文本死掉了，整个进程也不会闪退！
-                        # 至少能给前端返回错误信息，而不是白屏死锁
-                        print(f"DEBUG: FATAL ERROR extracting text from DOCX: {e}")
-                        word_text = f"无法解析此 Word 文档内容，出现底层错误: {str(e)}"
-                        word_images = []
+                #     except Exception as e:
+                #         # 加上这层巨大的 try-except，哪怕提取文本死掉了，整个进程也不会闪退！
+                #         # 至少能给前端返回错误信息，而不是白屏死锁
+                #         print(f"DEBUG: FATAL ERROR extracting text from DOCX: {e}")
+                #         word_text = f"无法解析此 Word 文档内容，出现底层错误: {str(e)}"
+                #         word_images = []
                         
-                    finally:
-                        # 5. 毁尸灭迹：无论解析成功还是报错，都必须删除这个临时文件，防止把服务器硬盘塞满
-                        if os.path.exists(safe_temp_path):
-                            os.remove(safe_temp_path)
+                #     finally:
+                #         # 5. 毁尸灭迹：无论解析成功还是报错，都必须删除这个临时文件，防止把服务器硬盘塞满
+                #         if os.path.exists(safe_temp_path):
+                #             os.remove(safe_temp_path)
 
-                    # ⬅️ Word 多图 → 仍然只有 1 个文件名（文件是一个）
-                    # 最终装入 results 时，依然使用原始变量 attachment_name
+                #     # ⬅️ Word 多图 → 仍然只有 1 个文件名（文件是一个）
+                #     # 最终装入 results 时，依然使用原始变量 attachment_name
+                #     results[attachment_name] = {
+                #         "text": word_text,
+                #         "images": word_images,
+                #         "filenames": [attachment_name]
+                #     }
+                elif file_extension == "docx":
+                    # 【测试截断】不要执行任何真实解析代码！直接返回一句话！
                     results[attachment_name] = {
-                        "text": word_text,
-                        "images": word_images,
+                        "text": f"这是测试内容。如果页面出现这句话没有白屏，说明真的是原先的解析代码把服务器卡死了。",
+                        "images": [],
                         "filenames": [attachment_name]
                     }
-
                 # -------- 图片 JPG/PNG --------
                 elif file_extension in ["jpg", "jpeg", "png"]:
                     pic = FileOperation.extract_picture(file_stream, attachment_name)
