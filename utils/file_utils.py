@@ -291,16 +291,16 @@ class FileOperation:
                     }
 
                 # -------- Word DOCX --------
-                elif file_extension == "docx":
+                elif file_extension == "docx":             
                     try:
-                   
                         file_stream.seek(0)
                         doc = docx.Document(io.BytesIO(file_stream.read()))
                         
-                        # 1. 提文本
-                        text = "\n".join([p.text.strip() for p in doc.paragraphs if p.text.strip()])
+                        # 1. 提取文本
+                        text_lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+                        text = "\n".join(text_lines)
                         
-                        # 2. 提表格
+                        # 2. 提取表格
                         tables = []
                         for table in doc.tables:
                             table_data = []
@@ -312,22 +312,27 @@ class FileOperation:
                                 
                         df_str = json.dumps(tables, ensure_ascii=False)
                         
-                        # 3. 组合完整内容并计算大小
+                        # 3. 组合完整内容
                         full_content = text + "\n" + df_str
-                        content_length = len(full_content)
                         
-                        # 💥【核心拦截：强制截断数据！】💥
-                        # 不管提取出了多少万字，强制只保留前 500 个字发给后续流程！
-                        truncated_content = full_content[:500]
+                        # 💥【终极防爆盾】：安全截断，防止撑爆 Cosmos DB 和大模型 Token 限制
+                        # 50000 字符是极其安全的边界，足以覆盖绝大多数长篇报告的核心内容
+                        MAX_CHARS = 50000 
+                        if len(full_content) > MAX_CHARS:
+                            final_content = full_content[:MAX_CHARS] + "\n\n[系统提示：由于文档表格过于庞大，为保障系统稳定，已截断末尾部分数据。]"
+                        else:
+                            final_content = full_content
                         
+                        # 4. 组装返回结果
                         results[attachment_name] = {
-                            "text": f"【防爆测试】解析其实成功了！真实总长度为 {content_length} 字符。为了防止下游数据库死锁，已强制截断：\n\n" + truncated_content,
-                            "images": [],
+                            "text": final_content,
+                            "images": [],  # 如果后期需要图片，可以在这里恢复图片提取函数
                             "filenames": [attachment_name]
                         }
                     except Exception as e:
+                        print(f"ERROR: DOCX parsing failed for {attachment_name} - {str(e)}")
                         results[attachment_name] = {
-                            "text": f"【解析报错】: {str(e)}",
+                            "text": f"文档解析失败，请检查文件格式: {str(e)}",
                             "images": [],
                             "filenames": [attachment_name]
                         }
