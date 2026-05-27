@@ -746,10 +746,20 @@ class TaskQueue(GlobalResource):
 
         # Determine queue based on tokens if attachment_names provided
         if attachment_names:
-            # token_result = cal_tokens(username, attachment_names)
-            token_result = {"total_tokens": 100}
-            total_tokens = token_result.get("total_tokens", 0)
-            if total_tokens > self.HEAVY_QUEUE_THRESHOLD:
+            # 默认设置为重任务，以防计算 Token 失败
+            token_result = {"total_tokens": TaskQueue.HEAVY_QUEUE_THRESHOLD + 1}
+            try:
+                # 尝试计算，如果卡死或报错，将走 except
+                calculated_result = cal_tokens(username, attachment_names)
+                # 确保就算 cal_tokens 吃掉了异常但返回 0 时，给个兜底
+                if calculated_result.get("total_tokens", 0) > 0:
+                    token_result = calculated_result
+            except Exception as e:
+                logger.error(f"cal_tokens failed entirely, using default threshold: {str(e)}")
+            
+            total_tokens = token_result.get("total_tokens", TaskQueue.HEAVY_QUEUE_THRESHOLD + 1)
+            
+            if total_tokens > TaskQueue.HEAVY_QUEUE_THRESHOLD:
                 queue_name = "heavy-queue"
             else:
                 queue_name = "light-queue"
