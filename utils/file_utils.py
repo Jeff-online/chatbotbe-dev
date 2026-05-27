@@ -111,23 +111,45 @@ class FileOperation:
         return final_text_str + df, is_content
 
     @staticmethod
-    def extract_text_from_word(docx_path):
+    def extract_text_from_word(file_obj):
+
+
         try:
-            doc = docx.Document(docx_path)
+            # 【核心安全机制】：无论传进来的是什么流，强行转成纯内存 BytesIO
+            # 彻底切断 python-docx 与底层文件系统的直接联系，防止死锁
+            if hasattr(file_obj, 'read'):
+                file_obj.seek(0)
+                doc = docx.Document(io.BytesIO(file_obj.read()))
+            else:
+                # 兼容直接传文件路径的情况
+                doc = docx.Document(file_obj)
         except Exception as e:
-            logging.error(f"加载 DOCX 文档失败，可能是路径或编码问题: {docx_path}, 错误: {str(e)}")
-            return ""
-        text = "\n".join([p.text for p in doc.paragraphs])
+            logging.error(f"加载 DOCX 失败: {str(e)}")
+            return f"[系统提示：文档底层加载失败，原因：{str(e)}]"
+            
+        try:
+            text = "\n".join([p.text for p in doc.paragraphs])
+        except:
+            text = ""
+
         tables = []
         df = ""
 
-        for table in doc.tables:
-            table_data = []
-            for row in table.rows:
-                row_data = [cell.text.strip() for cell in row.cells]
-                table_data.append(row_data)
-            if table_data:
-                tables.append(table_data)
+        try:
+            for table in doc.tables:
+                table_data = []
+                for row in table.rows:
+                    row_data = []
+                    for cell in row.cells:
+                        # 【性能核心】：极速读取底层 XML，绕过原生 cell.text 的内存黑洞
+                        cell_text = "".join(node.text for node in cell._element.iter() if node.tag.endswith('}t') and node.text)
+                        row_data.append(cell_text.strip())
+                    table_data.append(row_data)
+                if table_data:
+                    tables.append(table_data)
+        except Exception as e:
+            logging.error(f"解析表格失败: {str(e)}")
+            df = f"\n[系统提示：部分表格提取失败跳过]"
 
         if tables:
             try:
@@ -138,7 +160,7 @@ class FileOperation:
             except:
                 df = json.dumps(tables, ensure_ascii=False)
 
-        return text.strip() + df
+        return text.strip() + "\n" + df
 
     @staticmethod
     def extract_images_from_word(docx_path):
@@ -266,20 +288,29 @@ class FileOperation:
                 # -------- Word DOCX --------
                 elif file_extension == "docx":
                     try:
-                        # 第一步：仅仅尝试重置游标和读取数据，不做任何 Word 解析操作
+                        # 确保游标在起点
                         file_stream.seek(0)
-                        test_bytes = file_stream.read()
                         
-                        # 如果上面的 read() 成功了，前端就会显示下面这段话。
+                        # 放心调用！刚才更新的函数已经内置了绝对安全的内存隔离
+                        word_text = self.extract_text_from_word(file_stream)
+                        
+                        # 提取图片（如果不需要可以去掉）
+                        word_images = []
+                        try:
+                            file_stream.seek(0)
+                            word_images = self.extract_images_from_word(file_stream)
+                        except Exception as img_err:
+                            print(f"DEBUG: 图片提取失败: {img_err}")
+                            
                         results[attachment_name] = {
-                            "text": f"【排查测试】：文件流读取成功！文件大小为 {len(test_bytes)} 字节。这说明网络下载没问题，是 extract_text_from_word 解析代码把服务器搞崩了。",
-                            "images": [],
+                            "text": word_text,
+                            "images": word_images,
                             "filenames": [attachment_name]
                         }
                     except Exception as e:
-                        # 如果 read() 本身报错了，前端会显示报错信息
+                        # 哪怕天塌下来，也会把错误信息返回给大模型，绝不白屏
                         results[attachment_name] = {
-                            "text": f"【排查测试】：在 file_stream.read() 阶段报错，错误信息：{str(e)}",
+                            "text": f"解析该文档时遇到异常: {str(e)}",
                             "images": [],
                             "filenames": [attachment_name]
                         }
