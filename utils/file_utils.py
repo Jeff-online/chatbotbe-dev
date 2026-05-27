@@ -3,7 +3,6 @@ import docx
 import fitz
 import json
 import concurrent.futures
-import io
 import base64
 import chardet
 import pdfplumber
@@ -294,10 +293,7 @@ class FileOperation:
                 # -------- Word DOCX --------
                 elif file_extension == "docx":
                     try:
-                        import docx
-                        import io
-                        import json
-                        
+                   
                         file_stream.seek(0)
                         doc = docx.Document(io.BytesIO(file_stream.read()))
                         
