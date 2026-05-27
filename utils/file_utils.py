@@ -263,35 +263,29 @@ class FileOperation:
 
                 # -------- Word DOCX --------
                 elif file_extension == "docx":
-                    print(f"DEBUG: 强行短接 DOCX 解析，文件名为: {attachment_name}")
+                    try:
+                        file_stream.seek(0)
+                        word_text = self.extract_text_from_word(file_stream)
+                        
+                        file_stream.seek(0) # 再次重置游标，防止提取图片时读取不到内容
+                        try:
+                            word_images = self.extract_images_from_word(file_stream)
+                        except Exception as e:
+                            print(f"DEBUG: Failed to extract images from DOCX: {e}")
+                            word_images = []
+                    except Exception as e:
+                        # 加上这层巨大的 try-except，哪怕提取文本死掉了，整个进程也不会闪退！
+                        # 至少能给前端返回错误信息，而不是白屏死锁
+                        print(f"DEBUG: FATAL ERROR extracting text from DOCX: {e}")
+                        word_text = f"无法解析此 Word 文档内容，出现底层错误: {str(e)}"
+                        word_images = []
+
+                    # ⬅️ Word 多图 → 仍然只有 1 个文件名（文件是一个）
                     results[attachment_name] = {
-                        "text": f"这是测试内容。如果页面出现这句话没有白屏，说明真的是原先的解析代码把服务器卡死了。",
-                        "images": [],
+                        "text": word_text,
+                        "images": word_images,
                         "filenames": [attachment_name]
                     }
-                    # try:
-                    #     file_stream.seek(0)
-                    #     word_text = self.extract_text_from_word(file_stream)
-                        
-                    #     file_stream.seek(0) # 再次重置游标，防止提取图片时读取不到内容
-                    #     try:
-                    #         word_images = self.extract_images_from_word(file_stream)
-                    #     except Exception as e:
-                    #         print(f"DEBUG: Failed to extract images from DOCX: {e}")
-                    #         word_images = []
-                    # except Exception as e:
-                    #     # 加上这层巨大的 try-except，哪怕提取文本死掉了，整个进程也不会闪退！
-                    #     # 至少能给前端返回错误信息，而不是白屏死锁
-                    #     print(f"DEBUG: FATAL ERROR extracting text from DOCX: {e}")
-                    #     word_text = f"无法解析此 Word 文档内容，出现底层错误: {str(e)}"
-                    #     word_images = []
-
-                    # # ⬅️ Word 多图 → 仍然只有 1 个文件名（文件是一个）
-                    # results[attachment_name] = {
-                    #     "text": word_text,
-                    #     "images": word_images,
-                    #     "filenames": [attachment_name]
-                    # }
 
                 # -------- 图片 JPG/PNG --------
                 elif file_extension in ["jpg", "jpeg", "png"]:
