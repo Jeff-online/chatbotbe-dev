@@ -426,8 +426,10 @@ def _cache_with_limit(key: str, value: int):
 def _estimate_tokens_fast(blob_client, file_extension: str, encoding):
     """
     针对 5MB 以内小文件优化的 Token 估算函数
+    绝对避免 download_blob().readall() 以防止文件名编码导致的底层 404 死锁
     """
     try:
+        # 1. 极其轻量的请求：只获取文件属性（大小），不下载文件内容！
         blob_properties = blob_client.get_blob_properties()
         file_size = blob_properties.size  # bytes
 
@@ -437,58 +439,17 @@ def _estimate_tokens_fast(blob_client, file_extension: str, encoding):
             elif file_size < 500 * 1024: return 200
             else: return 300
 
-        # === PDF 文件（由于限额 5MB，直接读取全量数据进行精确解析） ===
+        # === PDF 文件 ===
         if file_extension == "pdf":
-            # 5MB 以内直接全量下载，确保解析 100% 成功
-            full_data = blob_client.download_blob().readall()
-            
-            try:
-                with fitz.open(stream=full_data, filetype="pdf") as doc:
-                    n_pages = len(doc)
-                    n_images = 0
-                    # 快速检查前 10 页的图像密度作为采样
-                    for i in range(min(10, n_pages)):
-                        n_images += len(doc[i].get_images(full=True))
-                    
-                    img_ratio = min(n_images / max(min(10, n_pages), 1), 1.0)
-            except Exception:
-                # 如果 fitz 失败，回退到特征匹配
-                pages_hint = full_data.count(b"/Type /Page")
-                images_hint = full_data.count(b"/Subtype /Image")
-                n_pages = max(1, pages_hint)
-                img_ratio = min(images_hint / n_pages, 1.0) if n_pages > 0 else 0.5
-
-            # 调优后的权重：文字页 500 tokens，图片页 300 tokens
-            text_tpp = 500  
-            image_tpp = 300 
-            tokens_est = int(n_pages * ((1 - img_ratio) * text_tpp + img_ratio * image_tpp))
-            
-            # 针对 5MB 以内的 PDF，防止结构化数据导致的虚高
+            tokens_est = int(file_size / 100) 
             return max(150, tokens_est)
 
         # === 文本类（TXT/JSON/CSV） ===
         if file_extension in ["txt", "json", "csv"]:
-            # 5MB 以内直接读取前 1MB 采样即可
-            sample_size = min(1024 * 1024, file_size)
-            sample_data = blob_client.download_blob(offset=0, length=sample_size).readall()
-            encoding_type = chardet.detect(sample_data)["encoding"] or "utf-8"
-            sample_text = sample_data.decode(encoding_type, errors="ignore")
-            
-            if not sample_text: return int(file_size / 4)
-            
-            sample_tokens = len(encoding.encode(sample_text))
-            token_density = sample_tokens / max(len(sample_text), 1)
-            # 修正密度：通常 1 个字符约 0.5~0.8 token (对于 tiktoken)
-            token_density = max(0.1, min(token_density, 1.2))
-            
-            avg_bytes_per_char = max(len(sample_data) / max(len(sample_text), 1), 1.0)
-            estimated_chars = file_size / avg_bytes_per_char
-            return int(estimated_chars * token_density)
+            return int(file_size * 0.6)
 
         # === Excel / Word 文件 ===
         if file_extension in ["xlsx", "xls", "docx"]:
-            # 5MB 以内的 Office 文件，通常包含大量 XML 结构，Token 密度较低
-            # 之前 1/10 的比例依然偏高，调大分母
             divisor = 25 if file_extension == "docx" else 30
             return max(100, int(file_size / divisor))
 
@@ -496,8 +457,8 @@ def _estimate_tokens_fast(blob_client, file_extension: str, encoding):
         return int(file_size / 10)
 
     except Exception as e:
-        print(f"Error estimating tokens: {e}")
-        return 100
+        print(f"DEBUG: 获取文件属性失败，触发防弹衣。错误: {str(e)}")
+        return 10000
 
 # ========================
 # 实用函数
