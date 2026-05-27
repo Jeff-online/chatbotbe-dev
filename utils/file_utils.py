@@ -265,54 +265,24 @@ class FileOperation:
 
                 # -------- Word DOCX --------
                 elif file_extension == "docx":
-                    
-                    def _parse_docx_safe():
-                        try:
-                            # 1. 强行将流转入纯内存，并抹除原始名字的痕迹
-                            file_stream.seek(0)
-                            mem_stream = io.BytesIO(file_stream.read())
-                            mem_stream.name = "safe_doc.docx" 
-                            
-                            # 2. 提取文本
-                            t_res = self.extract_text_from_word(mem_stream)
-                            
-                            # 3. 提取图片
-                            mem_stream.seek(0)
-                            i_res = []
-                            try:
-                                i_res = self.extract_images_from_word(mem_stream)
-                            except Exception as img_err:
-                                print(f"DEBUG: extract_images error: {str(img_err)}")
-                                
-                            return t_res, i_res
-                        except Exception as e:
-                            return f"文档解析报错: {str(e)}", []
-
-                    word_text = ""
-                    word_images = []
-                    
                     try:
-                        # 核心杀招：开启独立线程执行读取，设定 15 秒强制超时！
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                            future = executor.submit(_parse_docx_safe)
-                            # 如果底层因为特殊字符死锁，15秒后会强行中断等待，抛出 TimeoutError
-                            word_text, word_images = future.result(timeout=15)
-                            
-                    except concurrent.futures.TimeoutError:
-                        print(f"DEBUG: DOCX processing timed out for file: {attachment_name}")
-                        word_text = "文档读取超时：由于文件名中包含特殊字符，触发了底层系统读取死锁，已强制跳过。"
-                        word_images = []
+                        # 第一步：仅仅尝试重置游标和读取数据，不做任何 Word 解析操作
+                        file_stream.seek(0)
+                        test_bytes = file_stream.read()
+                        
+                        # 如果上面的 read() 成功了，前端就会显示下面这段话。
+                        results[attachment_name] = {
+                            "text": f"【排查测试】：文件流读取成功！文件大小为 {len(test_bytes)} 字节。这说明网络下载没问题，是 extract_text_from_word 解析代码把服务器搞崩了。",
+                            "images": [],
+                            "filenames": [attachment_name]
+                        }
                     except Exception as e:
-                        print(f"DEBUG: Thread execution error: {str(e)}")
-                        word_text = f"读取异常: {str(e)}"
-                        word_images = []
-
-                    # 无论如何，前端都一定会拿到这个 results，绝不会再白屏
-                    results[attachment_name] = {
-                        "text": word_text,
-                        "images": word_images,
-                        "filenames": [attachment_name]
-                    }
+                        # 如果 read() 本身报错了，前端会显示报错信息
+                        results[attachment_name] = {
+                            "text": f"【排查测试】：在 file_stream.read() 阶段报错，错误信息：{str(e)}",
+                            "images": [],
+                            "filenames": [attachment_name]
+                        }
                 # elif file_extension == "docx":
                 #     results[attachment_name] = {
                 #         "text": f"这是测试内容。如果页面出现这句话没有白屏，说明真的是原先的解析代码把服务器卡死了。",
