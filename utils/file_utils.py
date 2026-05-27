@@ -13,7 +13,6 @@ from flask import current_app
 import tiktoken
 import logging
 
-
 class FileOperation:
 
     @staticmethod
@@ -112,45 +111,52 @@ class FileOperation:
 
     @staticmethod
     def extract_text_from_word(file_obj):
-
-
         try:
-            # 【核心安全机制】：无论传进来的是什么流，强行转成纯内存 BytesIO
-            # 彻底切断 python-docx 与底层文件系统的直接联系，防止死锁
+            # 1. 纯内存隔离，彻底切断底层死锁
             if hasattr(file_obj, 'read'):
                 file_obj.seek(0)
                 doc = docx.Document(io.BytesIO(file_obj.read()))
             else:
-                # 兼容直接传文件路径的情况
                 doc = docx.Document(file_obj)
         except Exception as e:
             logging.error(f"加载 DOCX 失败: {str(e)}")
-            return f"[系统提示：文档底层加载失败，原因：{str(e)}]"
-            
+            return ""
+
+        # 2. 提取段落
+        text_lines = []
         try:
-            text = "\n".join([p.text for p in doc.paragraphs])
+            for p in doc.paragraphs:
+                if p.text.strip():
+                    text_lines.append(p.text.strip())
+            text = "\n".join(text_lines)
         except:
             text = ""
 
+        # 3. 提取表格【核心杀招：纯 XML 遍历法，绝对不死循环】
         tables = []
         df = ""
-
         try:
+            # 绝对不使用 table.rows，直接去底层 XML 抓取行(w:tr)和列(w:tc)
             for table in doc.tables:
                 table_data = []
-                for row in table.rows:
+                for tr in table._element.xpath('.//w:tr'):
                     row_data = []
-                    for cell in row.cells:
-                        # 【性能核心】：极速读取底层 XML，绕过原生 cell.text 的内存黑洞
-                        cell_text = "".join(node.text for node in cell._element.iter() if node.tag.endswith('}t') and node.text)
-                        row_data.append(cell_text.strip())
-                    table_data.append(row_data)
+                    for tc in tr.xpath('.//w:tc'):
+                        # 抓取当前单元格内所有 w:t (文本节点)
+                        cell_texts = tc.xpath('.//w:t/text()')
+                        cell_text = "".join(cell_texts).strip()
+                        row_data.append(cell_text)
+                    
+                    # 如果这一行不是全空，就加进数据里
+                    if any(row_data):
+                        table_data.append(row_data)
+                
                 if table_data:
                     tables.append(table_data)
         except Exception as e:
-            logging.error(f"解析表格失败: {str(e)}")
-            df = f"\n[系统提示：部分表格提取失败跳过]"
+            logging.error(f"解析表格异常: {str(e)}")
 
+        # 4. 转换为 JSON
         if tables:
             try:
                 if len(tables[0]) > 1:
@@ -288,27 +294,21 @@ class FileOperation:
                 # -------- Word DOCX --------
                 elif file_extension == "docx":
                     try:
-                        
-                        # 1. 强行读取文件字节流
+                        # 读取文本和表格（已经换上了极速 XML 引擎，秒级出结果）
                         file_stream.seek(0)
-                        file_bytes = file_stream.read()
+                        word_text = self.extract_text_from_word(file_stream)
                         
-                        # 2. 尝试用 python-docx 加载这些字节
-                        doc = docx.Document(io.BytesIO(file_bytes))
+                        # 暂时继续屏蔽图片提取，确保这最后一步稳操胜券
+                        word_images = []
                         
-                        # 3. 尝试读取几段文字
-                        paragraphs_count = len(doc.paragraphs)
-                        
-                        # 4. 如果程序能活着走到这里没死机，直接返回胜利宣言！
                         results[attachment_name] = {
-                            "text": f"【排雷测试】：闯关成功！成功加载文档，共有 {paragraphs_count} 个段落。这说明死机的原因100%是后面对【表格】的解析逻辑死循环了！",
-                            "images": [],
+                            "text": word_text,
+                            "images": word_images,
                             "filenames": [attachment_name]
                         }
                     except Exception as e:
-                        # 哪怕读取报错，也给前端返回文字，绝不白屏
                         results[attachment_name] = {
-                            "text": f"【排雷测试】：加载文档阶段报错，错误信息：{str(e)}",
+                            "text": f"文档处理异常: {str(e)}",
                             "images": [],
                             "filenames": [attachment_name]
                         }
