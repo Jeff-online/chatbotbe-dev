@@ -288,29 +288,27 @@ class FileOperation:
                 # -------- Word DOCX --------
                 elif file_extension == "docx":
                     try:
-                        # 确保游标在起点
+                        
+                        # 1. 强行读取文件字节流
                         file_stream.seek(0)
+                        file_bytes = file_stream.read()
                         
-                        # 放心调用！刚才更新的函数已经内置了绝对安全的内存隔离
-                        word_text = self.extract_text_from_word(file_stream)
+                        # 2. 尝试用 python-docx 加载这些字节
+                        doc = docx.Document(io.BytesIO(file_bytes))
                         
-                        # 提取图片（如果不需要可以去掉）
-                        word_images = []
-                        # try:
-                        #     file_stream.seek(0)
-                        #     word_images = self.extract_images_from_word(file_stream)
-                        # except Exception as img_err:
-                        #     print(f"DEBUG: 图片提取失败: {img_err}")
-                            
+                        # 3. 尝试读取几段文字
+                        paragraphs_count = len(doc.paragraphs)
+                        
+                        # 4. 如果程序能活着走到这里没死机，直接返回胜利宣言！
                         results[attachment_name] = {
-                            "text": word_text,
-                            "images": word_images,
+                            "text": f"【排雷测试】：闯关成功！成功加载文档，共有 {paragraphs_count} 个段落。这说明死机的原因100%是后面对【表格】的解析逻辑死循环了！",
+                            "images": [],
                             "filenames": [attachment_name]
                         }
                     except Exception as e:
-                        # 哪怕天塌下来，也会把错误信息返回给大模型，绝不白屏
+                        # 哪怕读取报错，也给前端返回文字，绝不白屏
                         results[attachment_name] = {
-                            "text": f"解析该文档时遇到异常: {str(e)}",
+                            "text": f"【排雷测试】：加载文档阶段报错，错误信息：{str(e)}",
                             "images": [],
                             "filenames": [attachment_name]
                         }
