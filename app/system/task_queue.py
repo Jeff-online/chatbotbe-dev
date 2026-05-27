@@ -746,7 +746,8 @@ class TaskQueue(GlobalResource):
 
         # Determine queue based on tokens if attachment_names provided
         if attachment_names:
-            token_result = cal_tokens(username, attachment_names)
+            # token_result = cal_tokens(username, attachment_names)
+            token_result = {"total_tokens": 100}
             total_tokens = token_result.get("total_tokens", 0)
             if total_tokens > self.HEAVY_QUEUE_THRESHOLD:
                 queue_name = "heavy-queue"
