@@ -243,13 +243,11 @@ class SessionManagement(GlobalResource):
                 print("触发纯文字新对话极速通道，跳过存储组件")
                 full_text = ""
             else:
-                connect_str = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
-                if not connect_str:
-                    logger.warning("未配置 Blob 密钥，缓存功能已跳过。")
+                if not hasattr(current_app, 'container_client') or not current_app.container_client:
+                    logger.warning("未检测到全局 Blob 容器客户端，缓存功能已跳过。")
                     full_text = "\n\n".join(merged_texts) if merged_texts else ""
                 else:
-                    blob_service_client = BlobServiceClient.from_connection_string(connect_str)
-                    container_client = blob_service_client.get_container_client("chatarea")
+                    container_client = current_app.container_client
 
                     blob_path = f"{username}/session_cache/{session_id}.txt"
                     blob_client = container_client.get_blob_client(blob_path)
