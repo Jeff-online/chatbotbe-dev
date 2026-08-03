@@ -13,7 +13,8 @@ from utils.file_utils import FileOperation, cal_tokens
 from .args_parser import CheckTokenParser
 from azure.core.exceptions import ResourceExistsError
 from werkzeug.utils import secure_filename
-from common.common_resource import GlobalResource, Resource
+from common.common_resource import GlobalResource
+from flask_restful import Resource as RawResource
 import json
 import unicodedata
 from .task_queue import TaskQueue, QueueState, QueueConcurrencyLock
@@ -709,7 +710,7 @@ class CheckToken(GlobalResource):
                 "code": 500
             }
 
-class AIChat(GlobalResource):
+class AIChat(RawResource):
     """
     免验证、无状态直连 AI 对话接口 (支持单次直连问答)
     请求地址: POST /dev-api/chat
