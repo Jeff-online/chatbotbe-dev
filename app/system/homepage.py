@@ -7,7 +7,7 @@ import logging
 from app import messages
 from . import system_api
 from . args_parser import *
-from flask import current_app
+from flask import current_app, request
 from datetime import datetime, timedelta
 from utils.file_utils import FileOperation, cal_tokens
 from .args_parser import CheckTokenParser
@@ -709,6 +709,79 @@ class CheckToken(GlobalResource):
                 "code": 500
             }
 
+class AIChat(GlobalResource):
+    """
+    免验证、无状态直连 AI 对话接口 (支持单次直连问答)
+    请求地址: POST /dev-api/chat
+    """
+    def post(self):
+        try:
+            body = request.get_json(silent=True) or {}
+            
+            # 1. 兼容两种请求格式：
+            # 格式 A (你参考项目的 messages 数组): {"messages": [{"role": "user", "content": "你好"}]}
+            # 格式 B (普通文本输入): {"content": "你好"}
+            messages_input = body.get("messages")
+            single_content = body.get("content")
+            
+            if messages_input and isinstance(messages_input, list):
+                # 如果传的是 messages 数组，提取最后一条 user 的发言，以及之前的历史
+                input_data = messages_input[-1].get("content", "") if messages_input else ""
+            elif single_content:
+                input_data = single_content
+            else:
+                return {"success": False, "error": "请求参数缺少 'messages' 或 'content'"}, 400
+
+            deploy_model = body.get("deploy_model") or body.get("model") or "gpt-5.2"
+
+            # 2. 直接复用你 SessionManagement 里现成的底层核心函数 get_answer
+            # 传入一次性的临时 session_id 和 username，绕过 CosmosDB 用户鉴权和记录
+            temp_session_id = f"quick_{str(uuid.uuid4())[:8]}"
+            temp_username = "anonymous_api_user"
+            
+            dialogue_history = [
+                {"role": "system", "content": "You are a friendly and knowledgeable AI assistant."}
+            ]
+
+            # 调用你的底层大模型计算逻辑
+            _, answer, used_model = SessionManagement.get_answer(
+                session_id=temp_session_id,
+                username=temp_username,
+                file_content={},
+                input_data=input_data,
+                question=dialogue_history,
+                history=None,
+                deploy_model=deploy_model
+            )
+
+            # 3. 返回符合对方参考项目格式的 JSON 结果
+            return {
+                "success": True,
+                "data": {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": answer
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ],
+                    "model": used_model
+                },
+                "code": 200
+            }
+
+        except Exception as e:
+            logger.error(f"AIChat 接口调用异常: {str(e)}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"AI服务调用失败: {str(e)}",
+                "code": 500
+            }, 500
+        
 system_api.add_resource(SessionManagement, "/session_management")
 system_api.add_resource(FileManagement, "/upload_file")
 system_api.add_resource(CheckToken, "/check_token")
+system_api.add_resource(AIChat, "/chat")
