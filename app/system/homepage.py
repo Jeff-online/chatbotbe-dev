@@ -712,7 +712,7 @@ class CheckToken(GlobalResource):
 
 class AIChat(RawResource):
     """
-    免验证、无状态直连 AI 对话接口 (支持单次直连问答)
+    免验证、无状态直连 AI 对话接口 (支持单次直连问答，支持多模态图片输入)
     请求地址: POST /dev-api/chat
     """
     def post(self):
@@ -720,14 +720,42 @@ class AIChat(RawResource):
             body = request.get_json(silent=True) or {}
             
             # 1. 兼容两种请求格式：
-            # 格式 A (你参考项目的 messages 数组): {"messages": [{"role": "user", "content": "你好"}]}
-            # 格式 B (普通文本输入): {"content": "你好"}
             messages_input = body.get("messages")
             single_content = body.get("content")
             
+            input_data = ""
+            file_content = {} # 【关键】准备一个字典用来装图片
+            
             if messages_input and isinstance(messages_input, list):
-                # 如果传的是 messages 数组，提取最后一条 user 的发言，以及之前的历史
-                input_data = messages_input[-1].get("content", "") if messages_input else ""
+                last_msg = messages_input[-1] if messages_input else {}
+                content = last_msg.get("content", "")
+                
+                # 【核心修改】：智能解析多模态数组
+                if isinstance(content, str):
+                    # 普通纯文本
+                    input_data = content
+                elif isinstance(content, list):
+                    # 多模态数组：提取文本和图片
+                    text_parts = []
+                    image_parts = []
+                    for item in content:
+                        if isinstance(item, dict):
+                            if item.get("type") == "text":
+                                text_parts.append(item.get("text", ""))
+                            elif item.get("type") == "image_url":
+                                # 提取 Base64 数据（兼容带不带前缀的情况）
+                                url = item.get("image_url", {}).get("url", "")
+                                if "base64," in url:
+                                    base64_str = url.split("base64,", 1)[1]
+                                    image_parts.append(base64_str)
+                    
+                    input_data = "\n".join(text_parts)
+                    # 将提取到的图片放入 file_content，底层代码会自动处理
+                    if image_parts:
+                        file_content["uploaded_image"] = {"images": image_parts}
+                else:
+                    input_data = str(content)
+                    
             elif single_content:
                 input_data = single_content
             else:
@@ -735,8 +763,6 @@ class AIChat(RawResource):
 
             deploy_model = body.get("deploy_model") or body.get("model") or "gpt-5.2"
 
-            # 2. 直接复用你 SessionManagement 里现成的底层核心函数 get_answer
-            # 传入一次性的临时 session_id 和 username，绕过 CosmosDB 用户鉴权和记录
             temp_session_id = f"quick_{str(uuid.uuid4())[:8]}"
             temp_username = "anonymous_api_user"
             
@@ -744,18 +770,17 @@ class AIChat(RawResource):
                 {"role": "system", "content": "You are a friendly and knowledgeable AI assistant."}
             ]
 
-            # 调用你的底层大模型计算逻辑
+            # 【关键】把解析出来的 file_content 传给底层
             _, answer, used_model = SessionManagement.get_answer(
                 session_id=temp_session_id,
                 username=temp_username,
-                file_content={},
-                input_data=input_data,
+                file_content=file_content,  # 传入图片数据
+                input_data=input_data,      # 传入纯文本
                 question=dialogue_history,
                 history=None,
                 deploy_model=deploy_model
             )
 
-            # 3. 返回符合对方参考项目格式的 JSON 结果
             return {
                 "success": True,
                 "data": {
